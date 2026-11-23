@@ -1,0 +1,21 @@
+PROIECT — COMPLETAȚI DATELE EDITORULUI ÎNAINTE DE PUBLICARE
+
+Numele legal al editorului: [NUMELE LEGAL AL EDITORULUI]
+Adresa comercială: [ADRESA COMERCIALĂ]
+Data intrării în vigoare: [DATA INTRĂRII ÎN VIGOARE]
+
+NACE Automation — Condiții de licență pentru utilizatorul final
+
+1. Licența de utilizare
+Editorul vă acordă o licență limitată, neexclusivă, netransferabilă și revocabilă pentru instalarea și utilizarea aplicației NACE Automation în forma furnizată, sub rezerva acestor condiții.
+
+2. Automatizarea opțională a tranzacțiilor reale
+Cât timp automatizarea este activă, aplicația poate transmite tranzacții reale prin contul dvs. conectat la o platformă de schimb terță, conform setărilor selectate. Puteți opri sau porni automatizarea din Setări. Sunteți responsabil pentru verificarea setărilor și monitorizarea contului pe platformă. Serviciile platformei și tranzacțiile sunt supuse și propriilor condiții și politici ale acesteia.
+
+3. Fără garanția tranzacțiilor sau a rezultatelor
+Automatizarea poate fi întreruptă sau întârziată, poate omite o tranzacție sau poate să nu poată verifica dacă aceasta a fost finalizată. Nu considerați o tranzacție finalizată decât dacă platforma de schimb o confirmă. Editorul nu garantează că va fi transmisă vreo tranzacție, obținerea unui anumit rezultat sau câștig, nici acordarea vreunui bonus sau a vreunei recompense.
+
+4. Drepturi prevăzute de lege
+Nicio prevedere din aceste condiții nu limitează drepturile legale pe care legea aplicabilă nu permite să fie excluse sau înlăturate.
+
+Asistență: VibeCodeDrop@pm.me

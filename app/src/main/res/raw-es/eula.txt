@@ -1,0 +1,21 @@
+BORRADOR — COMPLETE LOS DATOS DEL EDITOR ANTES DE PUBLICAR
+
+Nombre legal del editor: [NOMBRE LEGAL DEL EDITOR]
+Domicilio comercial: [DOMICILIO COMERCIAL]
+Fecha de entrada en vigor: [FECHA DE ENTRADA EN VIGOR]
+
+NACE Automation — Condiciones de licencia de usuario final
+
+1. Licencia de uso de la aplicación
+El editor le concede una licencia limitada, no exclusiva, intransferible y revocable para instalar y utilizar NACE Automation tal como se proporciona, sujeta a estas condiciones.
+
+2. Automatización opcional de operaciones reales
+Mientras la automatización esté activa, la aplicación puede enviar órdenes reales a través de su cuenta conectada en una plataforma de intercambio de terceros, según la configuración que seleccione. Puede detener o iniciar la automatización en Ajustes. Usted es responsable de revisar la configuración y supervisar su cuenta en la plataforma. Los servicios y las operaciones de la plataforma también están sujetos a sus propias condiciones y políticas.
+
+3. No se garantizan operaciones ni resultados
+La automatización puede interrumpirse o retrasarse, puede no realizar una operación o puede no poder verificar si se completó. No considere que una operación se completó hasta que la plataforma de intercambio lo confirme. El editor no garantiza que se envíe ninguna operación, ningún resultado o rendimiento concreto, ni ningún bono o recompensa.
+
+4. Derechos legales
+Nada de lo dispuesto en estas condiciones limita los derechos legales que la legislación aplicable no permita excluir o renunciar.
+
+Asistencia: VibeCodeDrop@pm.me

@@ -34,3 +34,13 @@ A verified result means the exchange showed an order in its Order tab. Trading o
 ## Support
 
 For help, use **Contact Support** in Settings or email [VibeCodeDrop@pm.me](mailto:VibeCodeDrop@pm.me). The app's EULA is available in Settings.
+
+## Build from source
+
+The Android app lives in `app/src/main`. To build on Windows, install JDK 17 or later, Android SDK Platform 36, and Android SDK Build Tools 36.0.0. Set `JAVA_HOME` and `ANDROID_HOME` to your installed JDK and SDK directories.
+
+```powershell
+.\build.ps1
+```
+
+The APK is written to `build/NACE Automation.apk`. The build creates a local development key on first use. Android accepts an in-place update only when both APKs use the same signing key.

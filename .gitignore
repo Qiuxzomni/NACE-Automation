@@ -1,0 +1,11 @@
+/build/
+/build-*/
+/outputs/
+*.apk
+*.jks
+*.keystore
+*.p12
+*.pfx
+.env
+.env.*
+local.properties

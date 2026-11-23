@@ -1,0 +1,21 @@
+DRAFT — COMPLETE THE PUBLISHER FIELDS BEFORE PUBLICATION
+
+Publisher legal name: [LEGAL PUBLISHER NAME]
+Business address: [BUSINESS ADDRESS]
+Effective date: [EFFECTIVE DATE]
+
+NACE Automation — End-User License Terms
+
+1. License to use the app
+The publisher grants you a limited, non-exclusive, non-transferable, revocable license to install and use NACE Automation as provided, subject to these terms.
+
+2. Optional real-trade automation
+While automation is active, the app may submit real trades through your connected third-party exchange account according to the settings you select. You can stop or start automation in Settings. You are responsible for reviewing your settings and monitoring your exchange account. Exchange services and transactions are also subject to the exchange’s own terms and policies.
+
+3. No guaranteed trades or results
+Automation may be interrupted or delayed, may miss a trade, or may be unable to verify whether a trade was completed. Do not treat a trade as completed unless your exchange confirms it. The publisher does not guarantee that any trade will be placed, any particular result or return, or any bonus or reward.
+
+4. Rights under applicable law
+Nothing in these terms limits any statutory rights that applicable law does not allow to be excluded or waived.
+
+Support: VibeCodeDrop@pm.me

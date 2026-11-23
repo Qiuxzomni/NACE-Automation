@@ -1,0 +1,27 @@
+services:
+  ingest:
+    build: .
+    command: uvicorn main:ingest_app --host 0.0.0.0 --port 8080 --no-access-log
+    env_file: .env
+    volumes: ["./data:/data"]
+    ports: ["127.0.0.1:8080:8080"]   # public only through the tunnel
+    mem_limit: 128m
+    restart: unless-stopped
+
+  dashboard:
+    build: .
+    command: uvicorn main:dash_app --host 0.0.0.0 --port 8081 --no-access-log
+    env_file: .env
+    volumes: ["./data:/data"]
+    ports: ["8081:8081"]             # LAN / Tailscale only — never tunnel this
+    mem_limit: 128m
+    restart: unless-stopped
+
+  # Option A only (Cloudflare Tunnel). Remove this service if using Tailscale Funnel.
+  cloudflared:
+    image: cloudflare/cloudflared:2024.12.2
+    command: tunnel --no-autoupdate run
+    environment: ["TUNNEL_TOKEN=${CF_TUNNEL_TOKEN}"]
+    depends_on: [ingest]
+    mem_limit: 64m
+    restart: unless-stopped

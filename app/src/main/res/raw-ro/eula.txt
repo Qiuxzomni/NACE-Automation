@@ -15,7 +15,10 @@ Cât timp automatizarea este activă, aplicația poate transmite tranzacții rea
 3. Fără garanția tranzacțiilor sau a rezultatelor
 Automatizarea poate fi întreruptă sau întârziată, poate omite o tranzacție sau poate să nu poată verifica dacă aceasta a fost finalizată. Nu considerați o tranzacție finalizată decât dacă platforma de schimb o confirmă. Editorul nu garantează că va fi transmisă vreo tranzacție, obținerea unui anumit rezultat sau câștig, nici acordarea vreunui bonus sau a vreunei recompense.
 
-4. Drepturi prevăzute de lege
+4. Statistici anonime de utilizare
+O dată pe zi, aplicația trimite un semnal anonim de utilizare, pentru ca editorul să poată număra instalările și utilizatorii activi. Acesta conține doar un identificator de instalare aleatoriu, creat pe dispozitivul dumneavoastră, versiunea aplicației, versiunea Android și limba aplicației. Nu include niciodată numărul de telefon, datele de autentificare, soldurile, tranzacțiile sau perechile de tranzacționare, iar adresele IP nu sunt stocate. Puteți dezactiva această funcție oricând din Setări, la „Statistici anonime de utilizare”.
+
+5. Drepturi prevăzute de lege
 Nicio prevedere din aceste condiții nu limitează drepturile legale pe care legea aplicabilă nu permite să fie excluse sau înlăturate.
 
 Asistență: VibeCodeDrop@pm.me

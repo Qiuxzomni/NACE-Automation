@@ -34,6 +34,8 @@ import android.graphics.drawable.InsetDrawable;
 import android.graphics.drawable.RippleDrawable;
 import android.net.Uri;
 import android.os.Build;
+import android.os.PowerManager;
+import android.os.SystemClock;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.IBinder;
@@ -133,6 +135,13 @@ public final class MainActivity extends Activity {
     private Dialog signInDialog;
     private String viewerSignInIssue;
     private LinearLayout startupNotificationPanel;
+    private TextView startupWakeupStep;
+    private TextView startupNotificationStep;
+    private TextView startupBatteryStep;
+    private LinearLayout startupBatteryPanel;
+    private TextView startupSignInStep;
+    private TextView startupSignInLock;
+    private LinearLayout startupSignInPanel;
     private Dialog viewer;
     private int viewerMode;
     private int pendingViewerMode;
@@ -152,6 +161,7 @@ public final class MainActivity extends Activity {
     private Button eth;
     private Button watch;
     private Button control;
+    private TextView countdown;
     private Dialog exchangeLinkDialog;
     private LinearLayout windows;
     private String priorWindows;
@@ -194,6 +204,7 @@ public final class MainActivity extends Activity {
         }
         setContentView(content);
         bound = bindService(new Intent(this, AutomationService.class), connection, BIND_AUTO_CREATE);
+        UsagePing.schedule(this);
         refresh();
     }
 
@@ -210,11 +221,8 @@ public final class MainActivity extends Activity {
             service.setDashboardVisible(true);
             service.refreshNotificationLanguage();
         }
+        postponedAttention.clear();
         refresh();
-        if (startupSignInComplete && viewer == null && needsNotificationPermission()
-                && !getPreferences(MODE_PRIVATE).getBoolean(NOTIFICATION_PROMPT_SHOWN, false)) {
-            enableNotifications();
-        }
     }
 
     @Override public void onPause() {
@@ -238,6 +246,11 @@ public final class MainActivity extends Activity {
     }
 
     @Override public void onDestroy() {
+        dismissAttention();
+        if (guideDialog != null) guideDialog.dismiss();
+        for (Dialog open : new ArrayList<>(trackedDialogs)) {
+            if (open.isShowing()) open.dismiss();
+        }
         if (signInDialog != null) signInDialog.dismiss();
         if (exchangeLinkDialog != null) exchangeLinkDialog.dismiss();
         dismissStartupDialog();
@@ -267,6 +280,7 @@ public final class MainActivity extends Activity {
         DashboardArtwork artwork = new DashboardArtwork(this);
         boolean compact = compactDashboard();
         DashboardColumn shell = new DashboardColumn(this);
+        shell.shrinkScheduleToFit = !stackedDashboard();
         shell.setBackground(NeonUi.backdrop());
         ScrollView scroll = new ScrollView(this);
         scroll.setClipToPadding(false);
@@ -327,7 +341,14 @@ public final class MainActivity extends Activity {
         background.setLetterSpacing(.05f);
         backgroundPill = row();
         backgroundPill.setGravity(Gravity.CENTER);
-        backgroundPill.addView(background, new LinearLayout.LayoutParams(WRAP, WRAP));
+        if (stackedDashboard()) {
+            // Large system text: let the label shrink to fit the pill instead of being cut off.
+            background.setMaxLines(1);
+            background.setAutoSizeTextTypeUniformWithConfiguration(7, 13, 1, TypedValue.COMPLEX_UNIT_SP);
+            backgroundPill.addView(background, new LinearLayout.LayoutParams(MATCH, MATCH));
+        } else {
+            backgroundPill.addView(background, new LinearLayout.LayoutParams(WRAP, WRAP));
+        }
         LinearLayout.LayoutParams backgroundSize = new LinearLayout.LayoutParams(dp(panelWidth * .75f), dp(34));
         backgroundSize.gravity = Gravity.CENTER_HORIZONTAL;
         backgroundSize.topMargin = dp(1);
@@ -401,7 +422,7 @@ public final class MainActivity extends Activity {
         plus.setTextColor(0xffefb9ff);
         plus.setBackground(NeonUi.addTimeFrame(this));
         add(schedule, plus, dp(38), 4);
-        addScheduleCard(shell, schedule);
+        addScheduleCard(stackedDashboard() ? page : shell, schedule);
         int warningRed = 0xffff535f;
         TextView controlNotice = centered(getString(R.string.control_warning), compact ? 13 : 15, warningRed, true);
         int warningPadding = dp(compact ? 4 : 8);
@@ -418,12 +439,20 @@ public final class MainActivity extends Activity {
         dock.setPadding(0, dp(5), 0, dp(8));
         dock.setBackgroundColor(DARK);
         LinearLayout actions = column();
-        add(actions, controlNotice, WRAP, 0);
+        countdown = centered("", compact ? 14 : 16, GOLD, true);
+        countdown.setFontFeatureSettings("tnum");
+        countdown.setLetterSpacing(.04f);
+        countdown.setPadding(dp(8), dp(compact ? 3 : 5), dp(8), dp(compact ? 3 : 5));
+        countdown.setBackground(NeonUi.frame(this, GOLD, 12));
+        countdown.setVisibility(View.GONE);
+        add(actions, countdown, WRAP, 0);
+        add(actions, controlNotice, WRAP, 4);
         addCoffeeButton(actions, 4);
         add(actions, two(watch, control, 7, 55), WRAP, 3);
         dock.addView(actions,
                 new FrameLayout.LayoutParams(dp(panelWidth), WRAP, Gravity.TOP | Gravity.CENTER_HORIZONTAL));
-        shell.addDock(dock);
+        if (stackedDashboard()) page.addView(dock, new LinearLayout.LayoutParams(MATCH, WRAP));
+        else shell.addDock(dock);
         return shell;
     }
 
@@ -436,6 +465,7 @@ public final class MainActivity extends Activity {
         int ivory = TerracottaUi.IVORY;
         boolean compact = compactDashboard();
         DashboardColumn shell = new DashboardColumn(this);
+        shell.shrinkScheduleToFit = !stackedDashboard();
         shell.setBackground(TerracottaUi.paper(this));
 
         ScrollView scroll = new ScrollView(this);
@@ -552,7 +582,13 @@ public final class MainActivity extends Activity {
         actions.setPadding(0, dp(5), 0, dp(7));
         TextView warning = centered(getString(R.string.terracotta_control_warning), compact ? 13 : 15,
                 TerracottaUi.RED, true);
-        add(actions, warning, WRAP, 0);
+        countdown = centered("", compact ? 14 : 16, TerracottaUi.CLAY, true);
+        countdown.setFontFeatureSettings("tnum");
+        countdown.setPadding(dp(8), dp(3), dp(8), dp(3));
+        countdown.setBackground(TerracottaUi.frame(this, Color.TRANSPARENT, TerracottaUi.CLAY, 9));
+        countdown.setVisibility(View.GONE);
+        add(actions, countdown, WRAP, 0);
+        add(actions, warning, WRAP, 4);
         watch = button(getString(R.string.watch_button), PURPLE, 9, () -> showBrowser(false));
         control = button("CONTROL", ORANGE, 9, () -> showBrowser(true));
         watch.setContentDescription(getString(R.string.watch_accessibility));
@@ -562,8 +598,18 @@ public final class MainActivity extends Activity {
         addCoffeeButton(actions, 5);
         add(actions, two(watch, control, 7, 52), WRAP, 3);
         dock.addView(actions, new FrameLayout.LayoutParams(dp(panelWidth), WRAP, Gravity.CENTER_HORIZONTAL));
-        shell.addDock(dock);
+        if (stackedDashboard()) page.addView(dock, new LinearLayout.LayoutParams(MATCH, WRAP));
+        else shell.addDock(dock);
         return shell;
+    }
+
+    /**
+     * With enlarged system text the pinned schedule card and dock leave too little room for the top of
+     * the dashboard (BTC/ETH disappeared at 130%). Then everything scrolls as one column. At 100% the
+     * layout is exactly as before.
+     */
+    private boolean stackedDashboard() {
+        return getResources().getConfiguration().fontScale > 1.05f;
     }
 
     private boolean compactDashboard() {
@@ -592,8 +638,21 @@ public final class MainActivity extends Activity {
             if (extra > 0) {
                 setScheduleHeight(scheduleViewport.getMeasuredHeight() + extra);
                 super.onMeasure(widthMeasureSpec, heightMeasureSpec);
+            } else if (extra < 0 && shrinkScheduleToFit) {
+                // Not enough room (e.g. with the countdown pill): shorten the schedule list so the
+                // top of the dashboard (BTC/ETH) stays fully visible, keeping at least one row.
+                int minimum = Math.round(62 * getResources().getDisplayMetrics().density);
+                int current = scheduleViewport.getMeasuredHeight();
+                int shorter = Math.max(minimum, current + extra);
+                if (shorter < current) {
+                    setScheduleHeight(shorter);
+                    super.onMeasure(widthMeasureSpec, heightMeasureSpec);
+                }
             }
         }
+
+        /** False when everything scrolls as one column (large system text). */
+        boolean shrinkScheduleToFit = true;
 
         private void setScheduleHeight(int height) {
             ViewGroup.LayoutParams size = scheduleViewport.getLayoutParams();
@@ -644,7 +703,8 @@ public final class MainActivity extends Activity {
         Button coffee = NeonUi.button(this, getString(R.string.buy_me_a_coffee));
         coffee.setGravity(Gravity.CENTER);
         coffee.setMaxLines(1);
-        coffee.setAutoSizeTextTypeUniformWithConfiguration(11, 16, 1, TypedValue.COMPLEX_UNIT_SP);
+        // Minimum 7 only matters with very large system text; at 100% the label fits as before.
+        coffee.setAutoSizeTextTypeUniformWithConfiguration(7, 16, 1, TypedValue.COMPLEX_UNIT_SP);
         if (terracotta) {
             tintTerracottaButton(coffee, true, 9);
             coffee.setStateListAnimator(null);
@@ -749,24 +809,30 @@ public final class MainActivity extends Activity {
                 setSelected(eth, pair.equals("ETH/USDT"), 25);
             }
         }
-        boolean watching = viewerMode == WATCH_VIEWER;
-        if (priorWatch == null || priorWatch != watching) {
-            priorWatch = watching;
-            setSelected(watch, watching, terracotta ? 9 : 19);
-            setSelected(control, !watching, terracotta ? 9 : 19);
-            if (terracotta) {
-                setCenteredButtonIcon(watch, icon(Icon.WATCH, watch.getCurrentTextColor(), 29));
-                setCenteredButtonIcon(control, icon(Icon.CONTROL, control.getCurrentTextColor(), 29));
-            }
+        if (priorWatch == null) {
+            // WATCH / CONTROL are fixed-color raised keys (DockKey); they no longer toggle like BTC/ETH.
+            priorWatch = true;
+            styleDockKey(watch, true);
+            styleDockKey(control, false);
         }
         ZonedDateTime now = ZonedDateTime.now(ZoneId.systemDefault());
         zone.setText(getString(R.string.phone_time, now.format(DateTimeFormatter.ofPattern("'UTC'xxx", Locale.ROOT))));
         renderWindows(snapshot, now);
         renderViewerStatus(snapshot);
+        renderCountdown();
         updateStartupDialog(snapshot);
-        if (resumed && exchangeLinkDialog == null && signInDialog == null && service != null) {
+        updateAttention(snapshot);
+        // Required settings come first; the automatic sign-in / link prompts wait until they are on.
+        boolean prerequisitesMet = !startupSignInComplete || missingPrerequisite() == null;
+        if (resumed && prerequisitesMet && guideDialog == null
+                && exchangeLinkDialog == null && signInDialog == null && service != null) {
             if (service.takeLinkRecoveryPrompt()) {
-                showExchangeLinkDialog();
+                if (startupSignInComplete) {
+                    showAttention("issue:LINK", new AutomationService.Attention(
+                            AutomationService.AttentionKind.LINK, "", "link recovery"));
+                } else {
+                    showExchangeLinkDialog();
+                }
             } else {
                 String issue = service.takeSignInHelp();
                 if (issue != null) {
@@ -782,10 +848,38 @@ public final class MainActivity extends Activity {
                         showBrowser(true);
                     }
                 } else if (startupSignInComplete && viewer == null && service.takeCredentialPrompt()) {
-                    showCredentialDialog();
+                    // Explain first ("login expired"), then offer Sign in.
+                    showAttention("issue:LOGIN", new AutomationService.Attention(
+                            AutomationService.AttentionKind.LOGIN, "", "sign-in needed"));
                 }
             }
         }
+    }
+
+    /** "NEXT TRADE IN 01:23:45", or "TRADE WINDOW OPEN NOW" while a window runs. */
+    private void renderCountdown() {
+        if (countdown == null) return;
+        long ms = service == null ? -1 : service.millisToNextTrade();
+        if (ms < 0) {
+            countdown.setVisibility(View.GONE);
+            return;
+        }
+        String text;
+        if (ms == 0) {
+            text = getString(R.string.trade_window_open);
+        } else {
+            long seconds = (ms + 999) / 1000;
+            long hours = seconds / 3600;
+            long minutes = seconds % 3600 / 60;
+            String clock = hours > 0
+                    ? String.format(Locale.ROOT, "%d:%02d:%02d", hours, minutes, seconds % 60)
+                    : String.format(Locale.ROOT, "%02d:%02d", minutes, seconds % 60);
+            text = getString(R.string.next_trade_in, clock);
+        }
+        if (!text.contentEquals(countdown.getText())) countdown.setText(text);
+        int tone = ms == 0 ? GREEN : GOLD;
+        countdown.setTextColor(uiColor(tone));
+        countdown.setVisibility(View.VISIBLE);
     }
 
     private void renderBalance(Snapshot snapshot) {
@@ -984,14 +1078,32 @@ public final class MainActivity extends Activity {
         }
     }
 
+    /** Switching what NACE trades always asks first: an accidental tap must not change the pair. */
     private void choosePair(String pair) {
         if (!hasService()) return;
-        try {
-            service.setPair(pair);
-            refresh();
-        } catch (RuntimeException exception) {
-            note(safeMessage(exception, getString(R.string.pair_change_error)));
-        }
+        Snapshot snapshot = service.getSnapshot();
+        String current = snapshot == null ? null : snapshot.pair;
+        if (pair.equals(current)) return;
+        String next = pair.split("/")[0];
+        String previous = current == null ? "" : current.split("/")[0];
+        String title = getString(R.string.pair_switch_title, next);
+        Dialog dialog = newDialog(title);
+        LinearLayout body = dialogPanel(title);
+        add(body, label(getString(R.string.pair_switch_body, next, previous), 16, WHITE, false), WRAP, 10);
+        Button keep = button(getString(R.string.pair_switch_no, previous), PURPLE, 10, dialog::dismiss);
+        Button change = button(getString(R.string.pair_switch_yes), ORANGE, 10, () -> {
+            dialog.dismiss();
+            if (!hasService()) return;
+            try {
+                service.setPair(pair);
+                refresh();
+            } catch (RuntimeException exception) {
+                note(safeMessage(exception, getString(R.string.pair_change_error)));
+            }
+        });
+        add(body, two(keep, change, 7, 50), WRAP, 14);
+        setScrollableContent(dialog, body);
+        showDialog(dialog, false);
     }
 
     private void showInterval(TradingWindow selected) {
@@ -1208,7 +1320,12 @@ public final class MainActivity extends Activity {
         viewerSignInIssue = null;
         viewerCaption = label(caption, 13, prefilled ? GOLD : MUTED, prefilled);
         add(root, viewerCaption, WRAP, 4);
-        FrameLayout webFrame = new FrameLayout(this);
+        FrameLayout webFrame = new FrameLayout(this) {
+            @Override public boolean onInterceptTouchEvent(android.view.MotionEvent event) {
+                if (viewerMode == CONTROL_VIEWER) restartControlIdleTimer();
+                return false;
+            }
+        };
         webFrame.setBackgroundColor(terracotta ? TerracottaUi.PAPER : DARK);
         LinearLayout.LayoutParams browserSize = new LinearLayout.LayoutParams(MATCH, 0, 1f);
         browserSize.topMargin = dp(9);
@@ -1224,11 +1341,18 @@ public final class MainActivity extends Activity {
         add(root, done, dp(44), 8);
         dialog.setContentView(root);
         dialog.setOnDismissListener(ignored -> releaseBrowser(dialog));
+        if (manual) restartControlIdleTimer();
         try {
             showDialog(dialog, true);
-            if (prefilled) webFrame.post(() -> {
-                if (viewer == dialog) current.scrollViewerToVerification();
-            });
+            if (prefilled) {
+                webFrame.post(() -> {
+                    if (viewer == dialog) current.scrollViewerToVerification();
+                });
+                // Again once the viewer has its final size: code field and Login button both visible.
+                webFrame.postDelayed(() -> {
+                    if (viewer == dialog) current.scrollViewerToVerification();
+                }, 900);
+            }
         } catch (RuntimeException exception) {
             dismissBrowser();
             note(safeMessage(exception, getString(R.string.viewer_open_error)));
@@ -1247,8 +1371,11 @@ public final class MainActivity extends Activity {
         boolean online = watchOpen && snapshot != null && snapshot.automationOnline && service.isWatchPairConfirmed();
         boolean checking = watchOpen && (snapshot == null || snapshot.session == AutomationService.SessionState.CHECKING
                 || service.isCheckingWatchPair());
-        String caption = getString(online ? R.string.viewer_automation_on
-                : checking ? R.string.viewer_automation_checking : R.string.viewer_automation_off);
+        // Name the pair, so it is clear WATCH is going to (and showing) the pair chosen in the app.
+        String chosen = snapshot == null ? "" : snapshot.pair;
+        String caption = online ? getString(R.string.viewer_automation_on_pair, chosen)
+                : checking ? getString(R.string.viewer_opening_pair, chosen)
+                : getString(R.string.viewer_automation_off);
         if (caption.contentEquals(viewerStatus.getText())) return;
         int tone = online ? GREEN : checking ? GOLD : RED;
         viewerStatus.setText(caption);
@@ -1265,8 +1392,23 @@ public final class MainActivity extends Activity {
         dialog.dismiss();
     }
 
+    private static final long CONTROL_IDLE_MS = 5 * 60 * 1000;
+    private final Runnable closeIdleControl = () -> {
+        if (viewerMode != CONTROL_VIEWER) return;
+        DiagnosticLog.log(this, "control", "closed after 5 minutes without use");
+        dismissBrowser();
+        note(getString(R.string.control_auto_closed));
+    };
+
+    /** A forgotten CONTROL keeps automation paused, so it closes after 5 minutes without a touch. */
+    private void restartControlIdleTimer() {
+        handler.removeCallbacks(closeIdleControl);
+        handler.postDelayed(closeIdleControl, CONTROL_IDLE_MS);
+    }
+
     private void releaseBrowser(Dialog dialog) {
         if (viewer != dialog) return;
+        handler.removeCallbacks(closeIdleControl);
         WebView browser = viewerBrowser;
         AutomationService owner = viewerService;
         viewer = null;
@@ -1296,13 +1438,37 @@ public final class MainActivity extends Activity {
         }
         if (!resumed) return;
         if (startupDialog == null) showStartupDialog();
-        startupWakeupPanel.setVisibility(hasWakeupPermission() ? View.GONE : View.VISIBLE);
+        boolean wakeups = hasWakeupPermission();
+        boolean notifications = notificationsEnabled();
+        boolean battery = batteryUnrestricted();
+        boolean unlocked = wakeups && notifications && battery;
+        setStartupStep(startupWakeupStep, R.string.setup_step_wakeups, wakeups);
+        setStartupStep(startupNotificationStep, R.string.setup_step_notifications, notifications);
+        setStartupStep(startupBatteryStep, R.string.setup_step_battery, battery);
+        startupBatteryPanel.setVisibility(battery ? View.GONE : View.VISIBLE);
+        startupSignInStep.setText(getString(R.string.setup_step_sign_in));
+        startupSignInStep.setTextColor(uiColor(unlocked ? GOLD : MUTED));
+        startupWakeupPanel.setVisibility(wakeups ? View.GONE : View.VISIBLE);
+        startupNotificationPanel.setVisibility(notifications ? View.GONE : View.VISIBLE);
+        startupSignInLock.setVisibility(unlocked ? View.GONE : View.VISIBLE);
+        setTreeEnabled(startupSignInPanel, unlocked);
+        startupSignInPanel.setAlpha(unlocked ? 1f : .4f);
         boolean signingIn = service != null && service.signInPending();
-        boolean readyToSignIn = startupPermissionsGranted() && !signingIn;
         startupSignInButton.setText(getString(signingIn ? R.string.sign_in_in_progress : R.string.sign_in));
-        startupSignInButton.setEnabled(readyToSignIn);
-        startupSignInButton.setAlpha(readyToSignIn ? 1f : .45f);
-        startupNotificationPanel.setVisibility(notificationsEnabled() ? View.GONE : View.VISIBLE);
+        startupSignInButton.setEnabled(unlocked && !signingIn);
+    }
+
+    /** Step header: green with a check mark once done, gold while it still needs doing. */
+    private void setStartupStep(TextView step, int title, boolean done) {
+        step.setText(getString(done ? R.string.setup_step_done : R.string.setup_step_todo, getString(title)));
+        step.setTextColor(uiColor(done ? GREEN : GOLD));
+    }
+
+    private static void setTreeEnabled(View view, boolean enabled) {
+        view.setEnabled(enabled);
+        if (!(view instanceof ViewGroup)) return;
+        ViewGroup group = (ViewGroup) view;
+        for (int i = 0; i < group.getChildCount(); i++) setTreeEnabled(group.getChildAt(i), enabled);
     }
 
     private void showStartupDialog() {
@@ -1313,17 +1479,34 @@ public final class MainActivity extends Activity {
         addLanguageChoices(content, dialog);
         add(content, label(getString(R.string.setup_caption),
                 14, WHITE, false), WRAP, 9);
+        startupWakeupStep = label("", 15, GOLD, true);
+        add(content, startupWakeupStep, WRAP, 12);
         startupWakeupPanel = column();
         add(startupWakeupPanel, label(getString(R.string.wakeups_description),
                 13, MUTED, false), WRAP, 0);
         add(startupWakeupPanel, button(getString(R.string.allow_wakeups), PURPLE, 12, this::openWakeupSettings), dp(44), 5);
-        add(content, startupWakeupPanel, WRAP, 12);
+        add(content, startupWakeupPanel, WRAP, 4);
+        startupNotificationStep = label("", 15, GOLD, true);
+        add(content, startupNotificationStep, WRAP, 12);
         startupNotificationPanel = column();
         add(startupNotificationPanel, label(getString(R.string.setup_notifications_description),
                 13, MUTED, false), WRAP, 0);
         add(startupNotificationPanel, button(getString(R.string.enable_notifications), PURPLE, 12, this::enableNotifications), dp(44), 5);
-        add(content, startupNotificationPanel, WRAP, 12);
-        startupSignInButton = addCredentialForm(content, () -> {});
+        add(content, startupNotificationPanel, WRAP, 4);
+        startupBatteryStep = label("", 15, GOLD, true);
+        add(content, startupBatteryStep, WRAP, 12);
+        startupBatteryPanel = column();
+        add(startupBatteryPanel, label(getString(R.string.setup_battery_description),
+                13, MUTED, false), WRAP, 0);
+        add(startupBatteryPanel, button(getString(R.string.allow_battery), PURPLE, 12, this::requestBatteryExemption), dp(44), 5);
+        add(content, startupBatteryPanel, WRAP, 4);
+        startupSignInStep = label("", 15, MUTED, true);
+        add(content, startupSignInStep, WRAP, 12);
+        startupSignInLock = label(getString(R.string.setup_sign_in_locked), 13, RED, true);
+        add(content, startupSignInLock, WRAP, 4);
+        startupSignInPanel = column();
+        startupSignInButton = addCredentialForm(startupSignInPanel, () -> {});
+        add(content, startupSignInPanel, WRAP, 0);
         setScrollableContent(dialog, content);
         startupDialog = dialog;
         showDialog(dialog, false);
@@ -1400,6 +1583,361 @@ public final class MainActivity extends Activity {
         return field;
     }
 
+    // ---------- "How NACE works" guide (once after first setup, and from Settings) ----------
+
+    private static final String GUIDE_SHOWN = "how_it_works_shown";
+    private Dialog guideDialog;
+
+    private void showGuide() {
+        if (guideDialog != null) return;
+        String title = getString(R.string.guide_title);
+        Dialog dialog = newDialog(title);
+        dialog.setCanceledOnTouchOutside(false);
+        LinearLayout body = dialogPanel(title);
+        // Everything in the guide is centered: title, intro, numbers, text and samples.
+        if (body.getChildAt(0) instanceof TextView) ((TextView) body.getChildAt(0)).setGravity(Gravity.CENTER);
+        add(body, centered(getString(R.string.guide_intro), 15, WHITE, false), WRAP, 8);
+
+        guidePoint(body, 1, getString(R.string.guide_1));
+        guideSample(body, guideCurrencies(), dp(44));
+        guidePoint(body, 2, getString(R.string.guide_2, plainLabel(R.string.add_time_button)));
+        guideSample(body, guideAddTime(), dp(38));
+        guidePoint(body, 3, getString(R.string.guide_3, getString(R.string.watch_button)));
+        guideSample(body, guideDockKey(true), dp(55));
+        guidePoint(body, 4, getString(R.string.guide_4));
+        guideSample(body, guideDockKey(false), dp(55));
+        guidePoint(body, 5, getString(R.string.guide_5));
+        guideSample(body, guideGreenSigns(), WRAP);
+        guidePoint(body, 6, getString(R.string.guide_6));
+        guidePoint(body, 7, getString(R.string.guide_7));
+        guidePoint(body, 8, getString(R.string.guide_8));
+        guidePoint(body, 9, getString(R.string.guide_9));
+        guidePoint(body, 10, getString(R.string.guide_10));
+
+        add(body, button(getString(R.string.guide_ok), ORANGE, 12, dialog::dismiss), dp(50), 16);
+        dialog.setOnDismissListener(ignored -> {
+            if (guideDialog == dialog) guideDialog = null;
+            getPreferences(MODE_PRIVATE).edit().putBoolean(GUIDE_SHOWN, true).apply();
+        });
+        setScrollableContent(dialog, body);
+        guideDialog = dialog;
+        showDialog(dialog, true);
+        DiagnosticLog.log(this, "app", "showed How NACE works guide");
+    }
+
+    private String plainLabel(int resource) {
+        // Non-breaking space keeps "+ Add time" together on one line.
+        return getString(resource).replace("\uff0b", "+").trim().replaceAll("\\s+", "\u00a0");
+    }
+
+    /** "1" in a gold circle-like badge, then the explanation. */
+    /** Gold number badge centered above the centered explanation. */
+    private void guidePoint(LinearLayout body, int number, String text) {
+        LinearLayout block = column();
+        block.setGravity(Gravity.CENTER_HORIZONTAL);
+        TextView badge = label(String.valueOf(number), 17, GOLD, true);
+        badge.setGravity(Gravity.CENTER);
+        badge.setBackground(terracotta ? TerracottaUi.frame(this, Color.TRANSPARENT, TerracottaUi.CLAY, 15)
+                : NeonUi.frame(this, GOLD, 15));
+        block.addView(badge, new LinearLayout.LayoutParams(dp(34), dp(34)));
+        TextView words = centered(text, 15, WHITE, false);
+        LinearLayout.LayoutParams wordsSize = new LinearLayout.LayoutParams(MATCH, WRAP);
+        wordsSize.topMargin = dp(6);
+        block.addView(words, wordsSize);
+        add(body, block, WRAP, 18);
+    }
+
+    /** A real copy of a dashboard element, centered under its point. Not clickable. */
+    private void guideSample(LinearLayout body, View sample, int height) {
+        disableTree(sample);
+        LinearLayout.LayoutParams size = new LinearLayout.LayoutParams(MATCH, height);
+        size.topMargin = dp(8);
+        body.addView(sample, size);
+    }
+
+    private static void disableTree(View view) {
+        view.setClickable(false);
+        view.setFocusable(false);
+        view.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        if (!(view instanceof ViewGroup)) return;
+        ViewGroup group = (ViewGroup) view;
+        for (int i = 0; i < group.getChildCount(); i++) disableTree(group.getChildAt(i));
+    }
+
+    private View guideCurrencies() {
+        DashboardArtwork artwork = new DashboardArtwork(this);
+        Button btc = button("BTC", ORANGE, 22, () -> {});
+        Button eth = button("ETH", PURPLE, 22, () -> {});
+        styleCurrency(btc, artwork.coin(DashboardArtwork.Coin.BTC, dp(22)));
+        styleCurrency(eth, artwork.coin(DashboardArtwork.Coin.ETH, dp(22)));
+        if (terracotta) {
+            setTerracottaPair(btc, true, true);
+            setTerracottaPair(eth, false, false);
+        } else {
+            setSelected(btc, true, 22);
+            setSelected(eth, false, 22);
+        }
+        LinearLayout pair = row();
+        LinearLayout.LayoutParams first = new LinearLayout.LayoutParams(0, MATCH, 1f);
+        first.rightMargin = dp(7);
+        pair.addView(btc, first);
+        pair.addView(eth, new LinearLayout.LayoutParams(0, MATCH, 1f));
+        return pair;
+    }
+
+    private View guideAddTime() {
+        Button plus = button(getString(R.string.add_time_button), PURPLE, 14, () -> {});
+        if (!terracotta) {
+            plus.setTextColor(0xffefb9ff);
+            plus.setBackground(NeonUi.addTimeFrame(this));
+        }
+        return plus;
+    }
+
+    private View guideDockKey(boolean isWatch) {
+        Button key = button(isWatch ? getString(R.string.watch_button) : "CONTROL", PURPLE, 19, () -> {});
+        styleCenteredDashboardButton(key);
+        styleDockKey(key, isWatch);
+        LinearLayout holder = row();
+        holder.setGravity(Gravity.CENTER_HORIZONTAL);
+        holder.addView(key, new LinearLayout.LayoutParams(dp(Math.min(230f, panelWidth * .58f)), MATCH));
+        return holder;
+    }
+
+    /** The green "ready" signs exactly as the dashboard draws them. */
+    private View guideGreenSigns() {
+        LinearLayout signs = column();
+        signs.setGravity(Gravity.CENTER_HORIZONTAL);
+        if (terracotta) {
+            LinearLayout banner = row();
+            banner.setGravity(Gravity.CENTER);
+            banner.setBackground(TerracottaUi.banner(this, true));
+            ImageView mark = new ImageView(this);
+            mark.setImageDrawable(icon(Icon.CHECK_CIRCLE, TerracottaUi.IVORY, 30));
+            banner.addView(mark, new LinearLayout.LayoutParams(dp(36), dp(36)));
+            add(signs, banner, dp(52), 0);
+        } else {
+            ImageView hero = new ImageView(this);
+            int online = asset("hero_online");
+            if (online != 0) hero.setImageResource(online);
+            hero.setScaleType(ImageView.ScaleType.FIT_CENTER);
+            add(signs, hero, dp(70), 0);
+        }
+        TextView ready = centered(getString(R.string.online), 18, GREEN, true);
+        if (!terracotta) ready.setShadowLayer(dp(9), 0, 0, 0xc970f677);
+        add(signs, ready, WRAP, 2);
+        TextView background = centered(getString(R.string.background_active), 12, GREEN, true);
+        background.setLetterSpacing(.05f);
+        setLeadingIcon(background, icon(Icon.LAYERS, uiColor(GREEN), 18), 8);
+        if (!terracotta) {
+            background.setTextColor(0xffecffe9);
+            background.setBackground(NeonUi.frame(this, 0xff31ff38, 23));
+        }
+        background.setPadding(dp(14), 0, dp(14), 0);
+        LinearLayout.LayoutParams pill = new LinearLayout.LayoutParams(WRAP, dp(32));
+        pill.topMargin = dp(4);
+        pill.gravity = Gravity.CENTER_HORIZONTAL;
+        signs.addView(background, pill);
+        TextView connected = centered(getString(R.string.signed_in), 15, GREEN, true);
+        if (!terracotta) connected.setShadowLayer(dp(6), 0, 0, 0xc52ae348);
+        setLeadingIcon(connected, icon(Icon.CHECK_CIRCLE, uiColor(GREEN), 20), 5);
+        LinearLayout.LayoutParams session = new LinearLayout.LayoutParams(WRAP, WRAP);
+        session.topMargin = dp(6);
+        session.gravity = Gravity.CENTER_HORIZONTAL;
+        signs.addView(connected, session);
+        return signs;
+    }
+
+    // ---------- Required settings and "NACE needs attention" help ----------
+
+    private Dialog attentionDialog;
+    private String attentionKey;
+    private TextView attentionStatus;
+    private AutomationService.AttentionKind seenAttention;
+    private long seenAttentionSince;
+    private boolean awaitingRecovery;
+    private boolean internetCheckRunning;
+    private final java.util.Set<AutomationService.AttentionKind> postponedAttention =
+            java.util.EnumSet.noneOf(AutomationService.AttentionKind.class);
+
+    private boolean batteryUnrestricted() {
+        PowerManager power = getSystemService(PowerManager.class);
+        return power == null || power.isIgnoringBatteryOptimizations(getPackageName());
+    }
+
+    /** What a successful trade needs on this phone, in the order the user should fix it. */
+    private String missingPrerequisite() {
+        if (!notificationsEnabled()) return "notifications";
+        if (!hasWakeupPermission()) return "wakeups";
+        if (!batteryUnrestricted()) return "battery";
+        return null;
+    }
+
+    private void updateAttention(Snapshot snapshot) {
+        if (!resumed || !startupSignInComplete || viewer != null || signInDialog != null
+                || exchangeLinkDialog != null || startupDialog != null || guideDialog != null) return;
+        String missing = missingPrerequisite();
+        DiagnosticLog.change(this, "prerequisites", missing == null ? "all met" : "MISSING: " + missing);
+        if (missing != null) {
+            showAttention("pre:" + missing, null);
+            return;
+        }
+        if (service == null) return;
+        AutomationService.Attention problem = service.attention();
+        DiagnosticLog.change(this, "attention", problem == null ? null : problem.kind + ": " + problem.issue);
+        if (problem == null) {
+            seenAttention = null;
+            boolean signedIn = snapshot != null && snapshot.session == AutomationService.SessionState.SIGNED_IN;
+            boolean issueOpen = attentionKey != null && attentionKey.startsWith("issue:");
+            if (signedIn && (awaitingRecovery || issueOpen)) {
+                awaitingRecovery = false;
+                showAttention("ready", null);
+            } else if (attentionKey != null && attentionKey.startsWith("pre:")) {
+                dismissAttention();
+            } else if (signedIn && attentionDialog == null && guideDialog == null
+                    && !getPreferences(MODE_PRIVATE).getBoolean(GUIDE_SHOWN, false)) {
+                showGuide();
+            }
+            return;
+        }
+        long now = SystemClock.elapsedRealtime();
+        if (problem.kind != seenAttention) {
+            seenAttention = problem.kind;
+            seenAttentionSince = now;
+        }
+        // Only for problems that last a few seconds, not for a check that is still running.
+        if (now - seenAttentionSince < 4000 || postponedAttention.contains(problem.kind)) return;
+        showAttention("issue:" + problem.kind.name(), problem);
+    }
+
+    private void showAttention(String key, AutomationService.Attention problem) {
+        if (key.equals(attentionKey) && attentionDialog != null && attentionDialog.isShowing()) return;
+        dismissAttention();
+        attentionKey = key;
+        boolean required = key.startsWith("pre:");
+        boolean ready = key.equals("ready");
+        String title = getString(ready ? R.string.ready_title : required ? R.string.prereq_title : R.string.attention_title);
+        Dialog dialog = newDialog(title);
+        dialog.setCancelable(!required);
+        dialog.setCanceledOnTouchOutside(false);
+        LinearLayout body = dialogPanel(title);
+        switch (key) {
+            case "pre:notifications":
+                add(body, label(getString(R.string.prereq_notifications), 16, WHITE, false), WRAP, 10);
+                add(body, button(getString(R.string.enable_notifications), PURPLE, 12, this::enableNotifications), dp(48), 12);
+                add(body, label(getString(R.string.prereq_notifications_tip), 14, GOLD, false), WRAP, 12);
+                break;
+            case "pre:wakeups":
+                add(body, label(getString(R.string.prereq_wakeups), 16, WHITE, false), WRAP, 10);
+                add(body, button(getString(R.string.allow_wakeups), PURPLE, 12, this::openWakeupSettings), dp(48), 12);
+                break;
+            case "pre:battery":
+                add(body, label(getString(R.string.prereq_battery), 16, WHITE, false), WRAP, 10);
+                add(body, button(getString(R.string.allow_battery), PURPLE, 12, this::requestBatteryExemption), dp(48), 12);
+                break;
+            case "ready":
+                add(body, label(getString(R.string.ready_for_trade), 20, GREEN, true), WRAP, 12);
+                add(body, button(getString(R.string.close), PURPLE, 12, this::dismissAttention), dp(48), 14);
+                break;
+            default:
+                addIssueHelp(body, problem);
+        }
+        setScrollableContent(dialog, body);
+        attentionDialog = dialog;
+        showDialog(dialog, false);
+        DiagnosticLog.log(this, "app", "showed popup: " + key);
+    }
+
+    private void addIssueHelp(LinearLayout body, AutomationService.Attention problem) {
+        AutomationService.AttentionKind kind = problem.kind;
+        switch (kind) {
+            case INTERNET:
+                add(body, label(getString(R.string.attention_internet), 17, RED, true), WRAP, 10);
+                add(body, label(getString(R.string.attention_internet_help), 15, WHITE, false), WRAP, 8);
+                attentionStatus = label("", 16, WHITE, true);
+                attentionStatus.setVisibility(View.GONE);
+                add(body, attentionStatus, WRAP, 10);
+                add(body, button(getString(R.string.check_internet), ORANGE, 12, this::checkInternetFromPopup), dp(48), 12);
+                break;
+            case LOGIN:
+                add(body, label(getString(R.string.attention_login), 17, RED, true), WRAP, 10);
+                add(body, button(getString(R.string.sign_in), ORANGE, 12, () -> {
+                    awaitingRecovery = true;
+                    dismissAttention();
+                    if (startupPermissionsGranted()) showCredentialDialog();
+                }), dp(48), 12);
+                break;
+            case LINK:
+                add(body, label(getString(R.string.attention_link), 17, RED, true), WRAP, 10);
+                if (!problem.reason.isEmpty()) add(body, label(problem.reason, 14, MUTED, false), WRAP, 6);
+                add(body, button(getString(R.string.enter_new_link), ORANGE, 12, () -> {
+                    awaitingRecovery = true;
+                    dismissAttention();
+                    showExchangeLinkDialog();
+                }), dp(48), 12);
+                break;
+            default:
+                add(body, label(problem.reason, 17, RED, true), WRAP, 10);
+                add(body, label(getString(R.string.attention_other_help, getString(R.string.watch)), 15, WHITE, false), WRAP, 8);
+                add(body, button(getString(R.string.watch), ORANGE, 12, () -> {
+                    dismissAttention();
+                    showBrowser(false);
+                }), dp(48), 12);
+        }
+        add(body, button(getString(R.string.later), PURPLE, 12, () -> {
+            postponedAttention.add(kind);
+            dismissAttention();
+        }), dp(44), 8);
+    }
+
+    private void checkInternetFromPopup() {
+        if (!hasService() || internetCheckRunning || attentionStatus == null) return;
+        internetCheckRunning = true;
+        attentionStatus.setVisibility(View.VISIBLE);
+        attentionStatus.setTextColor(uiColor(WHITE));
+        attentionStatus.setText(R.string.checking_internet);
+        service.checkInternetNow(online -> runOnUiThread(() -> {
+            internetCheckRunning = false;
+            if (online) awaitingRecovery = true;
+            if (attentionStatus == null) return;
+            attentionStatus.setTextColor(uiColor(online ? GREEN : RED));
+            attentionStatus.setText(online ? R.string.internet_ok_checking : R.string.internet_still_down);
+        }));
+    }
+
+    private void requestBatteryExemption() {
+        try {
+            startActivity(new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                    Uri.parse("package:" + getPackageName())));
+        } catch (ActivityNotFoundException | SecurityException error) {
+            startActivity(new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS));
+        }
+    }
+
+    private void dismissAttention() {
+        if (attentionDialog != null) attentionDialog.dismiss();
+        attentionDialog = null;
+        attentionKey = null;
+        attentionStatus = null;
+    }
+
+    /** Settings > Share diagnostic log: the recent log as text, to send to support. */
+    private void shareDiagnosticLog() {
+        DiagnosticLog.log(this, "app", "diagnostic log shared");
+        String header = "NACE " + installedVersion() + " · Android " + Build.VERSION.RELEASE + " (SDK "
+                + Build.VERSION.SDK_INT + ") · " + Build.MANUFACTURER + " " + Build.MODEL + "\n\n";
+        Intent send = new Intent(Intent.ACTION_SEND)
+                .setType("text/plain")
+                .putExtra(Intent.EXTRA_EMAIL, new String[]{SUPPORT_EMAIL})
+                .putExtra(Intent.EXTRA_SUBJECT, getString(R.string.share_log_subject))
+                .putExtra(Intent.EXTRA_TEXT, header + DiagnosticLog.tail(this, 1500));
+        try {
+            startActivity(Intent.createChooser(send, getString(R.string.share_log)));
+        } catch (ActivityNotFoundException error) {
+            note(getString(R.string.support_mail_unavailable, SUPPORT_EMAIL));
+        }
+    }
+
     private void dismissStartupDialog() {
         if (startupDialog == null) return;
         startupDialog.dismiss();
@@ -1407,14 +1945,22 @@ public final class MainActivity extends Activity {
         startupWakeupPanel = null;
         startupSignInButton = null;
         startupNotificationPanel = null;
+        startupBatteryStep = null;
+        startupBatteryPanel = null;
+        startupWakeupStep = null;
+        startupNotificationStep = null;
+        startupSignInStep = null;
+        startupSignInLock = null;
+        startupSignInPanel = null;
     }
 
     private boolean hasWakeupPermission() {
         return Build.VERSION.SDK_INT < Build.VERSION_CODES.S || WindowWakeups.canSchedule(this);
     }
 
+    /** Setup steps 1-3: wake-ups, notifications and background running (battery unrestricted). */
     private boolean startupPermissionsGranted() {
-        return hasWakeupPermission() && notificationsEnabled();
+        return hasWakeupPermission() && notificationsEnabled() && batteryUnrestricted();
     }
 
     private boolean needsNotificationPermission() {
@@ -1511,10 +2057,18 @@ public final class MainActivity extends Activity {
             alertSounds.setText(blockerSoundLabel());
         });
         add(content, alertSounds, dp(44), 6);
+        Button usageStats = button(usageStatsLabel(), PURPLE, 12, () -> {});
+        usageStats.setOnClickListener(view -> {
+            UsagePing.setEnabled(this, !UsagePing.enabled(this));
+            usageStats.setText(usageStatsLabel());
+        });
+        add(content, usageStats, dp(44), 6);
         if (status != null && status.session != AutomationService.SessionState.SIGNED_IN) {
             add(content, button(getString(R.string.sign_in), ORANGE, 12, () -> {
                 dialog.dismiss();
-                showCredentialDialog();
+                // Same rule as the first screen: notifications and wake-ups first.
+                if (startupPermissionsGranted()) showCredentialDialog();
+                else refresh();
             }), dp(44), 6);
         }
         addLanguageChoices(content, dialog);
@@ -1533,6 +2087,11 @@ public final class MainActivity extends Activity {
             }), dp(44), 5);
         }
         add(content, button(getString(R.string.contact_support), PURPLE, 12, this::contactSupport), dp(44), 9);
+        add(content, button(getString(R.string.guide_open), PURPLE, 12, () -> {
+            dialog.dismiss();
+            showGuide();
+        }), dp(44), 5);
+        add(content, button(getString(R.string.share_log), PURPLE, 12, this::shareDiagnosticLog), dp(44), 5);
         add(content, button(getString(R.string.eula_title), PURPLE, 12, this::showEula), dp(44), 5);
         add(content, button(getString(R.string.close), PURPLE, 12, dialog::dismiss), dp(44), 5);
         add(content, centered(getString(R.string.app_version, installedVersion()), 11, MUTED, false), WRAP, 8);
@@ -1543,6 +2102,10 @@ public final class MainActivity extends Activity {
     private String blockerSoundLabel() {
         return getString(AutomationBlockerAlert.soundsEnabled(this)
                 ? R.string.blocker_sounds_on : R.string.blocker_sounds_off);
+    }
+
+    private String usageStatsLabel() {
+        return getString(UsagePing.enabled(this) ? R.string.usage_stats_on : R.string.usage_stats_off);
     }
 
     private void refreshAutomationSwitch(Button button) {
@@ -1632,8 +2195,12 @@ public final class MainActivity extends Activity {
         showDialog(dialog, false);
     }
 
+    private final java.util.Set<Dialog> trackedDialogs =
+            java.util.Collections.newSetFromMap(new java.util.WeakHashMap<>());
+
     private Dialog newDialog(String title) {
         Dialog dialog = new Dialog(this);
+        trackedDialogs.add(dialog);
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
         dialog.setTitle(title);
         return dialog;
@@ -1752,6 +2319,17 @@ public final class MainActivity extends Activity {
     private void styleDockButton(Button button, Icon symbol) {
         styleCenteredDashboardButton(button);
         setCenteredButtonIcon(button, icon(symbol, WHITE, 29));
+    }
+
+    private void styleDockKey(Button button, boolean isWatch) {
+        // One shared look for both keys, never the purple/orange that means "selected" on BTC/ETH.
+        int text = DockKey.textColor();
+        button.setBackground(terracotta ? DockKey.terracotta(this, 9) : DockKey.neon(this, 19));
+        button.setTextColor(text);
+        button.setShadowLayer(dp(2), 0, dp(1), DockKey.textShadow());
+        // Keep the label centered on the key face, above the 5 dp lip.
+        button.setPadding(dp(8), 0, dp(8), dp(5));
+        setCenteredButtonIcon(button, icon(isWatch ? Icon.WATCH : Icon.CONTROL, text, 29));
     }
 
     private void styleCenteredDashboardButton(Button button) {

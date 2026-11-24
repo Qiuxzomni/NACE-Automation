@@ -22,7 +22,10 @@ import java.util.UUID;
 
 /** Announces a current trading blocker until it clears or the user acknowledges it. */
 public final class AutomationBlockerAlert {
-    private static final String CHANNEL = "nace_automation_blockers";
+    // New id: channel sound/vibration cannot be changed after creation, so the old silent one is removed.
+    private static final String CHANNEL = "nace_warnings";
+    private static final String OLD_CHANNEL = "nace_automation_blockers";
+    private static final long[] VIBRATION = {0, 700, 300, 700, 300, 700};
     private static final String PREFERENCES = "automation_blocker_alert";
     private static final String SOUNDS = "sounds";
     private static final String OCCURRENCE = "occurrence";
@@ -31,6 +34,7 @@ public final class AutomationBlockerAlert {
     private static final String ACKNOWLEDGED_TOKEN = "acknowledged_token";
     private static final String TOKEN_EXTRA = "alert_token";
     private static final int NOTIFICATION_ID = 4606;
+    private static final int WARNING_RED = 0xffd32f2f;
     private static final int ACKNOWLEDGE_ACTION = 46;
     private static final long BEEP_INTERVAL_MS = 30_000;
     private static final int BEEP_DURATION_MS = 400;
@@ -66,13 +70,15 @@ public final class AutomationBlockerAlert {
         preferences(context).edit().putBoolean(SOUNDS, enabled).apply();
     }
 
-    void report(String occurrenceKey, String window, String pair, String issue) {
+    /** @return true when this is a new problem (not one already being shown), so it should be spoken. */
+    boolean report(String occurrenceKey, String window, String pair, String issue) {
         String detail = issue + "\n" + window + " · " + pair;
         if (occurrenceKey.equals(occurrence) && issue.equals(this.issue)) {
             if (!posted && !acknowledged()) posted = postNotification();
             refreshSound();
-            return;
+            return false;
         }
+        boolean fresh = false;
         stopSound();
         occurrence = occurrenceKey;
         this.issue = issue;
@@ -81,15 +87,23 @@ public final class AutomationBlockerAlert {
         if (token == null || !occurrenceKey.equals(preferences.getString(OCCURRENCE, null))
                 || !issue.equals(preferences.getString(ISSUE, null))) {
             token = UUID.randomUUID().toString();
+            fresh = true;
             preferences.edit().putString(ACTIVE_TOKEN, token).putString(OCCURRENCE, occurrenceKey)
                     .putString(ISSUE, issue).remove(ACKNOWLEDGED_TOKEN).apply();
         }
         posted = !acknowledged() && postNotification();
         refreshSound();
+        return fresh;
     }
 
-    void clear() {
-        if (token == null && !preferences.contains(ACTIVE_TOKEN)) return;
+    /** True while a warning is being shown (acknowledged or not). */
+    boolean active() {
+        return token != null;
+    }
+
+    /** @return true when a warning was showing and is now cleared. */
+    boolean clear() {
+        if (token == null && !preferences.contains(ACTIVE_TOKEN)) return false;
         token = null;
         occurrence = null;
         issue = null;
@@ -98,11 +112,13 @@ public final class AutomationBlockerAlert {
                 .remove(ACKNOWLEDGED_TOKEN).apply();
         dismissNotification();
         stopSound();
+        return true;
     }
 
-    void close() {
+    /** @param dismiss false keeps a live WARNING on screen after the service is gone. */
+    void close(boolean dismiss) {
         preferences.unregisterOnSharedPreferenceChangeListener(preferenceListener);
-        dismissNotification();
+        if (dismiss) dismissNotification();
         stopSound();
     }
 
@@ -131,8 +147,14 @@ public final class AutomationBlockerAlert {
                     AppLanguage.text(context, "NACE automation alerts", "Alerte de automatizare NACE",
                             "Alertas de automatización de NACE"), NotificationManager.IMPORTANCE_HIGH);
             channel.setSound(null, null);
-            channel.enableVibration(false);
+            channel.enableVibration(true);
+            channel.setVibrationPattern(VIBRATION);
+            channel.setBypassDnd(true);
+            channel.setLockscreenVisibility(Notification.VISIBILITY_PUBLIC);
             notifications.createNotificationChannel(channel);
+            if (notifications.getNotificationChannel(OLD_CHANNEL) != null) {
+                notifications.deleteNotificationChannel(OLD_CHANNEL);
+            }
 
             Intent acknowledge = new Intent(context, AcknowledgeReceiver.class)
                     .setData(Uri.parse("nace-alert://acknowledge/" + token))
@@ -145,14 +167,18 @@ public final class AutomationBlockerAlert {
             Intent open = new Intent(context, MainActivity.class)
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
             PendingIntent openApp = PendingIntent.getActivity(context, NOTIFICATION_ID, open, PendingIntent.FLAG_IMMUTABLE);
-            String title = AppLanguage.text(context, "NACE needs attention", "Verifică aplicația NACE", "Revisa NACE");
+            String title = AppLanguage.text(context, "⚠ WARNING · NACE needs attention",
+                    "⚠ ATENȚIE · Verifică aplicația NACE", "⚠ ATENCIÓN · Revisa NACE");
             Notification publicVersion = new Notification.Builder(context, CHANNEL)
                     .setSmallIcon(android.R.drawable.ic_dialog_alert)
+                    .setColor(WARNING_RED)
                     .setContentTitle(title)
                     .addAction(action)
                     .build();
             notifications.notify(NOTIFICATION_ID, new Notification.Builder(context, CHANNEL)
                     .setSmallIcon(android.R.drawable.ic_dialog_alert)
+                    .setColor(WARNING_RED)
+                    .setCategory(Notification.CATEGORY_ALARM)
                     .setContentTitle(title)
                     .setContentText(issue)
                     .setStyle(new Notification.BigTextStyle().bigText(detail))

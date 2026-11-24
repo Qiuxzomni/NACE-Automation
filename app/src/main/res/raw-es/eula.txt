@@ -15,7 +15,10 @@ Mientras la automatización esté activa, la aplicación puede enviar órdenes r
 3. No se garantizan operaciones ni resultados
 La automatización puede interrumpirse o retrasarse, puede no realizar una operación o puede no poder verificar si se completó. No considere que una operación se completó hasta que la plataforma de intercambio lo confirme. El editor no garantiza que se envíe ninguna operación, ningún resultado o rendimiento concreto, ni ningún bono o recompensa.
 
-4. Derechos legales
+4. Estadísticas de uso anónimas
+Una vez al día, la aplicación envía una señal de uso anónima para que el editor pueda contar las instalaciones y los usuarios activos. Solo contiene un identificador de instalación aleatorio creado en su dispositivo, la versión de la aplicación, la versión de Android y el idioma de la aplicación. Nunca incluye su número de teléfono, sus datos de inicio de sesión, saldos, operaciones ni pares de negociación, y las direcciones IP no se almacenan. Puede desactivarlo en cualquier momento en Ajustes, en "Estadísticas de uso anónimas".
+
+5. Derechos legales
 Nada de lo dispuesto en estas condiciones limita los derechos legales que la legislación aplicable no permita excluir o renunciar.
 
 Asistencia: VibeCodeDrop@pm.me

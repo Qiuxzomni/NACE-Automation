@@ -79,6 +79,8 @@ public final class AutomationService extends Service {
     private static final String HISTORY_CHECKPOINT = "history_checkpoint_ms";
     private static final String SCHEDULE_ZONE = "schedule_zone";
     private static final String AUTOMATION_STOPPED = "automation_stopped";
+    private static final String ONLINE_ANNOUNCED = "online_announced_window";
+    private static final long ONLINE_ANNOUNCE_LEAD_SECONDS = 300;
     private static final String MISSED_OFFLINE = "Missed while offline. Automation did not run during this window.";
     private static final String BALANCE_DAY = "balance_day";
     private static final String DAY_OPEN_BALANCE = "day_open_balance";
@@ -111,6 +113,23 @@ public final class AutomationService extends Service {
     private static final int RESULT_LIMIT = 60;
 
     public enum SessionState { CHECKING, SIGNED_IN, SIGNED_OUT, UNAVAILABLE }
+
+    /** What the user must fix, so the app can offer the right help (Sign in, Check internet, New link). */
+    public enum AttentionKind { INTERNET, LOGIN, LINK, OTHER }
+
+    public static final class Attention {
+        public final AttentionKind kind;
+        /** Localized, for the user. */
+        public final String reason;
+        /** English source text, for logs and the WARNING notification. */
+        final String issue;
+
+        Attention(AttentionKind kind, String reason, String issue) {
+            this.kind = kind;
+            this.reason = reason;
+            this.issue = issue;
+        }
+    }
 
     public static final class TradingWindow {
         public final String start;
@@ -265,6 +284,8 @@ public final class AutomationService extends Service {
     private boolean watchPairPending;
     private boolean watchPairChecking;
     private boolean watchPairConfirmed;
+    /** WATCH re-tries once (fresh page) when the Copy Trading list could not be shown. */
+    private int watchPairRetries;
     private int watchPairCheck;
     private Consumer<Boolean> pairCheckFinished;
     private boolean workflowRequest;
@@ -286,7 +307,7 @@ public final class AutomationService extends Service {
     private SignInAttempt signInAttempt;
     private boolean attemptedSavedSignIn;
     private static final String VERIFICATION_PREFILLED =
-            "Your phone number and password are already filled in. Enter the verification code, then tap Login.";
+            "Your phone number and password are already filled in. Enter the security code, then tap the Login button under it (not the Login tab at the top). If you don't see the button, scroll down a little.";
     private String signInHelp;
     private boolean signInHelpShown;
     private boolean credentialPromptPending;
@@ -326,6 +347,37 @@ public final class AutomationService extends Service {
         return scheduledAutomationEnabled(context) && (saved.getBoolean(INITIALIZED, false) || saved.contains("live"));
     }
 
+    /**
+     * Rebuilds the wake-up alarms straight from saved settings, without the service running. Used by
+     * the alarm receiver itself (so one refused service start cannot break the chain), after boot,
+     * after an app update and when the exact-alarm permission changes.
+     */
+    static void rescheduleFromPreferences(Context context) {
+        try {
+            SharedPreferences saved = context.getSharedPreferences(PREFS, MODE_PRIVATE);
+            boolean stopped = saved.getBoolean(AUTOMATION_STOPPED, false);
+            String zoneId = saved.getString(SCHEDULE_ZONE, null);
+            String encoded = saved.getString("windows", null);
+            ZoneId zone = zoneId != null ? ZoneId.of(zoneId)
+                    : encoded == null ? DailySchedule.DEFAULT_ZONE : DailySchedule.ZONE;
+            List<TradingWindow> list;
+            if (encoded == null) {
+                list = defaults();
+            } else {
+                JSONArray schedule = new JSONArray(encoded);
+                List<TradingWindow> read = new ArrayList<>();
+                for (int position = 0; position < schedule.length(); position++) {
+                    JSONObject entry = schedule.getJSONObject(position);
+                    read.add(new TradingWindow(entry.getString("start"), entry.getString("end")));
+                }
+                list = validatedWindows(read);
+            }
+            WindowWakeups.schedule(context, !stopped, list, zone);
+        } catch (JSONException | RuntimeException error) {
+            DiagnosticLog.log(context, "alarms", "could not rebuild alarms from settings: " + error);
+        }
+    }
+
     static boolean scheduledAutomationEnabled(Context context) {
         return !context.getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(AUTOMATION_STOPPED, false);
     }
@@ -334,6 +386,7 @@ public final class AutomationService extends Service {
         super.onCreate();
         preferences = getSharedPreferences(PREFS, MODE_PRIVATE);
         automationStopped = preferences.getBoolean(AUTOMATION_STOPPED, false);
+        UsagePing.schedule(this);
         loadConfiguration();
         internetProbe = new InternetProbe(this, handler);
         blockerAlert = new AutomationBlockerAlert(this);
@@ -345,6 +398,7 @@ public final class AutomationService extends Service {
         if (Build.VERSION.SDK_INT >= 33) registerReceiver(timeZoneChanged, timeZoneFilter, Context.RECEIVER_NOT_EXPORTED);
         else registerReceiver(timeZoneChanged, timeZoneFilter);
         handler.post(tick);
+        DiagnosticLog.log(this, "service", "created");
     }
 
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
@@ -360,6 +414,7 @@ public final class AutomationService extends Service {
         } catch (RuntimeException error) {
             foreground = false;
             message = "Android could not keep automation active in the background.";
+            DiagnosticLog.log(this, "service", "COULD NOT START in the foreground: " + error);
             stopSelf();
             return START_NOT_STICKY;
         }
@@ -369,10 +424,12 @@ public final class AutomationService extends Service {
             return START_NOT_STICKY;
         }
         reconcileMissedWindows(Instant.now());
-        if (intent != null && intent.getLongExtra(WindowWakeups.WAKE_LEAD_EXTRA, -1)
-                == WindowWakeups.WORKER_WAKE_LEAD_SECONDS) {
+        long lead = intent == null ? -1 : intent.getLongExtra(WindowWakeups.WAKE_LEAD_EXTRA, -1);
+        if (lead == WindowWakeups.WORKER_WAKE_LEAD_SECONDS) {
             earlyAlarmReceived = true;
         }
+        if (lead == WindowWakeups.HEALTH_CHECK_LEAD_SECONDS) startHealthCheck();
+        logEnvironment();
         refreshWakeup();
         wakeWorker();
         return START_STICKY;
@@ -383,8 +440,10 @@ public final class AutomationService extends Service {
     }
 
     @Override public void onDestroy() {
+        DiagnosticLog.log(this, "service", "destroyed (automation stopped by user: " + automationStopped + ")");
         internetProbe.close();
-        blockerAlert.close();
+        // Keep a live WARNING visible when the service goes away, unless the user stopped automation.
+        blockerAlert.close(automationStopped);
         handler.removeCallbacksAndMessages(null);
         unregisterReceiver(timeZoneChanged);
         outcomeSpeaker.close();
@@ -668,6 +727,7 @@ public final class AutomationService extends Service {
     public void setPair(String choice) {
         NaceWebScript.instrumentId(choice);
         if (pair.equals(choice)) return;
+        DiagnosticLog.log(this, "pair", "user switched from " + pair + " to " + choice);
         requireChangeable();
         Instant changedAt = Instant.now();
         reconcileMissedWindows(changedAt);
@@ -741,6 +801,9 @@ public final class AutomationService extends Service {
         cancelPairCheck();
         watchPairPending = !takeControl;
         watchPairConfirmed = false;
+        watchPairRetries = 0;
+        DiagnosticLog.log(this, "viewer", (takeControl ? "CONTROL" : "WATCH") + " opened (session "
+                + effectiveSession(SystemClock.elapsedRealtime()) + ", warm-up pair ready " + preflightPairReady + ")");
         preflightPairReady = false;
         detach(browser);
         browser.readOnly = !takeControl;
@@ -815,6 +878,7 @@ public final class AutomationService extends Service {
 
     private boolean scheduledWorkDue() {
         if (automationStopped) return foreground && verifyingSubmittedTrade();
+        if (foreground && healthCheckActive()) return true;
         ZonedDateTime now = ZonedDateTime.now(scheduleZone);
         DailySchedule.Occurrence next = nextScheduledWindow();
         // The OnePlus can batch an alarm before its requested time as well as after it.
@@ -827,6 +891,100 @@ public final class AutomationService extends Service {
 
     private boolean workerNeeded() {
         return dashboardVisible || viewerOpen || scheduledWorkDue();
+    }
+
+    private static final long HEALTH_CHECK_MS = 180_000;
+    private long healthCheckUntil;
+    private final Runnable healthVerdict = this::finishHealthCheck;
+
+    private boolean healthCheckActive() {
+        return healthCheckUntil != 0 && SystemClock.elapsedRealtime() < healthCheckUntil;
+    }
+
+    /** About an hour before a window: wake up, check internet, NACE and login for three minutes. */
+    private void startHealthCheck() {
+        healthCheckUntil = SystemClock.elapsedRealtime() + HEALTH_CHECK_MS;
+        lastProbeAt = 0;
+        handler.removeCallbacks(healthVerdict);
+        handler.postDelayed(healthVerdict, HEALTH_CHECK_MS);
+        DiagnosticLog.log(this, "health", "check started (about 1 hour before the next window)");
+    }
+
+    private void finishHealthCheck() {
+        healthCheckUntil = 0;
+        Attention problem = attention();
+        DailySchedule.Occurrence next = nextScheduledWindow();
+        if (problem != null && problem.kind != AttentionKind.OTHER && next != null && !automationStopped) {
+            DiagnosticLog.log(this, "health", "PROBLEM before " + next.start + ": " + problem.issue);
+            reportBlocker(next, pair, problem.issue);
+        } else {
+            DiagnosticLog.log(this, "health", problem == null ? "ok" : "ok for trading (note: " + problem.issue + ")");
+        }
+        wakeWorker();
+    }
+
+    /** Device state that can silently stop warnings or background work. */
+    private void logEnvironment() {
+        NotificationManager manager = getSystemService(NotificationManager.class);
+        DiagnosticLog.change(this, "notifications", manager != null && manager.areNotificationsEnabled()
+                ? "enabled" : "DISABLED (warnings cannot be shown)");
+        DiagnosticLog.change(this, "wake-ups", WindowWakeups.canSchedule(this)
+                ? "allowed" : "NOT ALLOWED (scheduled runs cannot wake the phone)");
+        android.os.PowerManager power = getSystemService(android.os.PowerManager.class);
+        DiagnosticLog.change(this, "battery", power != null && power.isIgnoringBatteryOptimizations(getPackageName())
+                ? "unrestricted" : "OPTIMIZED (Android may stop NACE in the background)");
+        DiagnosticLog.change(this, "network", networkAvailable() ? "available" : "NO VALIDATED NETWORK");
+    }
+
+    /**
+     * The problem the user has to fix now, or null. Transient states (still checking, background
+     * still starting) are not reported, so the app does not show a popup for something that is
+     * about to resolve itself.
+     */
+    Attention attention() {
+        long elapsed = SystemClock.elapsedRealtime();
+        if (automationStopped || manualControl) return null;
+        String issue = readinessIssue(elapsed);
+        if (issue == null) {
+            if (blockerAlert.active() && failedTradeIssue != null) {
+                return new Attention(AttentionKind.OTHER, localize(this, failedTradeIssue), failedTradeIssue);
+            }
+            return null;
+        }
+        AttentionKind kind;
+        if (INTERNET_DOWN.equals(issue)) kind = AttentionKind.INTERNET;
+        else if (EXCHANGE_DNS_ERROR.equals(issue) || EXCHANGE_UNAVAILABLE.equals(issue)) kind = AttentionKind.LINK;
+        else if ("Use Control to sign in to NACE.".equals(issue)
+                || (signInHelp != null && issue.equals(signInHelp))) kind = AttentionKind.LOGIN;
+        else if ("Checking the NACE session.".equals(issue)
+                || "Open NACE and check that the background service is active.".equals(issue)
+                || WAKEUPS_REQUIRED.equals(issue)
+                || "Control is open. Scheduled automation is paused.".equals(issue)) return null;
+        else kind = AttentionKind.OTHER;
+        return new Attention(kind, localize(this, issue), issue);
+    }
+
+    /** "Check Internet" in the app: test the connection now and re-check NACE right after. */
+    void checkInternetNow(java.util.function.Consumer<Boolean> done) {
+        internetProbe.check(online -> {
+            DiagnosticLog.log(this, "internet", "check from app: " + (online ? "online" : "OFFLINE"));
+            if (online) {
+                internetAtPageFailure = null;
+                lastProbeAt = 0;
+                if (browser != null && mainFrameFailed) browser.reload();
+            }
+            wakeWorker();
+            done.accept(online);
+        });
+    }
+
+    /** While the app is open: a warning that was raised clears as soon as everything is ready again. */
+    private void clearWarningWhenRecovered(long elapsed) {
+        if (!blockerAlert.active() || failedTradeIssue != null || parked) return;
+        if (currentOccurrence() != null || upcomingPreflight(ZonedDateTime.now(scheduleZone)) != null) return;
+        if (readinessIssue(elapsed) != null || effectiveSession(elapsed) != SessionState.SIGNED_IN) return;
+        DiagnosticLog.log(this, "warning", "cleared: ready again");
+        clearAndAnnounceRecovery(null);
     }
 
     private void parkWorker() {
@@ -853,6 +1011,7 @@ public final class AutomationService extends Service {
             return;
         }
         parked = false;
+        if (dashboardVisible) clearWarningWhenRecovered(SystemClock.elapsedRealtime());
         if (scheduledWorkDue()) keepCpuAwake();
         else if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
         long elapsed = SystemClock.elapsedRealtime();
@@ -929,6 +1088,9 @@ public final class AutomationService extends Service {
             preflightPairReady = false;
             preflightIssue = null;
             preflightStartedAt = elapsed;
+            DiagnosticLog.log(this, "preflight", (finalCheck ? "final check" : "warm-up") + " for "
+                    + target.date + " " + target.start + " " + pair);
+            logEnvironment();
             preflightRequiredProbe = probeId + 1;
             nextPairCheckAt = 0;
             lastProbeAt = 0;
@@ -941,6 +1103,7 @@ public final class AutomationService extends Service {
             int check = ++preflightInternetGeneration;
             internetProbe.check(online -> {
                 if (check != preflightInternetGeneration) return;
+                DiagnosticLog.change(this, "internet", online ? "online" : "OFFLINE (probe failed)");
                 preflightInternet = online;
                 preflightInternetCheckedAt = SystemClock.elapsedRealtime();
                 wakeWorker();
@@ -960,7 +1123,8 @@ public final class AutomationService extends Service {
         if (verifiedProbeId < preflightRequiredProbe) return;
         if (preflightPairReady) {
             preflightIssue = null;
-            showTradeFailureOrClear(current);
+            clearAndAnnounceRecovery(current);
+            announceOnlineBeforeWindow(target, now, current);
             return;
         }
         if (watchPairChecking || elapsed < nextPairCheckAt) return;
@@ -971,7 +1135,7 @@ public final class AutomationService extends Service {
                     || readinessIssue(SystemClock.elapsedRealtime()) != null) return;
             preflightPairReady = confirmed;
             preflightIssue = confirmed ? null : "Could not verify the selected pair. Open Watch to check it.";
-            if (confirmed) showTradeFailureOrClear(currentOccurrence());
+            if (confirmed) clearAndAnnounceRecovery(currentOccurrence());
             else notifyPreflightIssue(preflightIssue);
         });
     }
@@ -1242,13 +1406,14 @@ public final class AutomationService extends Service {
                 failedTradeIssue = null;
                 outcomeSpeaker.speak(true);
             } else if ("failed".equals(status) || ("skipped".equals(status) && !manualControl)) {
+                // "Trade failed" first, then the spoken WARNING with the reason (from reportBlocker).
+                outcomeSpeaker.speak(false);
                 if (!automationStopped && sameWindow(run.occurrence, currentOccurrence())) {
                     failedTradeWindow = run.occurrence;
                     failedTradePair = run.pair;
                     failedTradeIssue = resultMessage;
                     reportBlocker(run.occurrence, run.pair, resultMessage);
                 }
-                outcomeSpeaker.speak(false);
             }
         }
         message = resultMessage;
@@ -1368,6 +1533,7 @@ public final class AutomationService extends Service {
     }
 
     private void setSession(SessionState next, String amount, boolean realAccount) {
+        DiagnosticLog.change(this, "session", next.name());
         session = next;
         lastCheck = Instant.now();
         verifiedAt = next == SessionState.SIGNED_IN ? SystemClock.elapsedRealtime() : 0;
@@ -1490,6 +1656,13 @@ public final class AutomationService extends Service {
                 }
 
                 @Override public boolean onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {
+                    DiagnosticLog.log(AutomationService.this, "browser", "Android browser renderer stopped"
+                            + (detail != null && detail.didCrash() ? " (crash)" : " (killed for memory)"));
+                    if (view != browser && view != finalConfirmationBrowser) {
+                        // An old, already replaced browser: do not tear down the live one.
+                        view.destroy();
+                        return true;
+                    }
                     if (finalConfirmationBrowser == view) finalConfirmationBrowser = null;
                     if (activeRun != null) {
                         Run run = activeRun;
@@ -1498,7 +1671,7 @@ public final class AutomationService extends Service {
                     }
                     discardBrowser();
                     invalidateSession();
-                    message = "The Android browser stopped. Reopen the viewer to reconnect.";
+                    message = "The Android browser stopped. NACE is reconnecting.";
                     lastVirtualDisplayAttempt = 0;
                     return true;
                 }
@@ -1514,6 +1687,8 @@ public final class AutomationService extends Service {
     }
 
     private void markBrowserLoadFailed(boolean dnsFailed) {
+        DiagnosticLog.log(this, "nace-link", dnsFailed ? "NACE address could not be resolved (DNS)"
+                : "NACE page could not be loaded");
         if (mainFrameFailed) return;
         exchangeDnsFailed = dnsFailed;
         int generation = ++exchangeLoadGeneration;
@@ -1554,26 +1729,49 @@ public final class AutomationService extends Service {
         SessionState current = effectiveSession(SystemClock.elapsedRealtime());
         if (current == SessionState.SIGNED_OUT) {
             watchPairPending = false;
+            DiagnosticLog.log(this, "watch", "copy list not shown: signed out");
             return;
         }
         if (current != SessionState.SIGNED_IN) return;
         if (watchPairChecking) return;
         watchPairPending = false;
-        startPairCheck(true, confirmed -> watchPairConfirmed = confirmed);
+        startPairCheck(true, confirmed -> {
+            watchPairConfirmed = confirmed;
+            DiagnosticLog.log(this, "watch", confirmed ? "copy trading list shown"
+                    : "copy trading list NOT shown within 25 s (retry " + watchPairRetries + ")");
+            // The page can be left with the side panel open. Outside a trade window, reload it once and retry.
+            if (!confirmed && viewerOpen && !manualControl && watchPairRetries < 1 && activeRun == null
+                    && currentOccurrence() == null && !workflowRequest && finalConfirmationBrowser == null) {
+                watchPairRetries++;
+                navigateToPair(pair, true);
+                watchPairPending = true;
+                wakeWorker();
+            }
+        });
     }
+
+    /** The page showed another pair: its own link was reloaded once during this check. */
+    private boolean pairCheckReloaded;
+    /** The site ignored the pair link: choose the pair in the site's own pair list (throttled). */
+    private boolean pairCheckPanelAllowed;
 
     private void startPairCheck(boolean showCopyList, Consumer<Boolean> finished) {
         watchPairChecking = true;
+        pairCheckReloaded = false;
+        pairCheckPanelAllowed = false;
         pairCheckFinished = finished;
         SharedBrowser target = browser;
         String targetPair = pair;
         int check = ++watchPairCheck;
         String url = target.getUrl();
+        DiagnosticLog.log(this, "pair", "check started (" + (showCopyList ? "watch" : "warm-up") + ", page "
+                + (url == null ? "none" : Uri.parse(url).getFragment()) + ", width " + target.getWidth() + ")");
         String route = url == null ? null : Uri.parse(url).getFragment();
         if (route == null || !route.startsWith("/forward?") || !naceOrigin(Uri.parse(url))) {
             navigateToPair(targetPair, false);
         }
-        handler.postDelayed(() -> finishWatchPairCheck(check, false), 15000);
+        // Room for opening the link and, if needed, choosing the pair in the site's list.
+        handler.postDelayed(() -> finishWatchPairCheck(check, false), 25000);
         checkWatchPair(target, targetPair, check, false, showCopyList);
     }
 
@@ -1583,12 +1781,34 @@ public final class AutomationService extends Service {
             finishWatchPairCheck(check, false);
             return;
         }
-        target.evaluateJavascript(NaceWebScript.selectWatchPair(exchangeLink.origin, targetPair, !selected, showCopyList), raw -> {
+        // The page must always end up on the pair chosen in the app (WATCH included): first its own
+        // link, and when the site ignores the link, the site's pair list. Never while a trade runs.
+        boolean allowPanel = pairCheckPanelAllowed && !(showCopyList && activeRun != null);
+        target.evaluateJavascript(NaceWebScript.selectWatchPair(exchangeLink.origin, targetPair, allowPanel, showCopyList), raw -> {
             if (!watchPairChecking || check != watchPairCheck) return;
             Object state = decode(raw);
+            DiagnosticLog.change(this, "pairState", String.valueOf(state));
             if ("matched".equals(state)) {
                 finishWatchPairCheck(check, true);
                 return;
+            }
+            if ("mismatch-url".equals(state)) {
+                if (!pairCheckReloaded) {
+                    // The page is on another pair's address: open the selected pair's own link.
+                    pairCheckReloaded = true;
+                    if (!(showCopyList && activeRun != null)) {
+                        DiagnosticLog.log(this, "pair", "page on another pair: opening the " + targetPair + " link");
+                        navigateToPair(targetPair, true);
+                    }
+                } else if (!pairCheckPanelAllowed) {
+                    pairCheckPanelAllowed = true;
+                    DiagnosticLog.log(this, "pair", "link did not switch the page: selecting " + targetPair + " in the pair list");
+                }
+            } else if ("mismatch-header".equals(state) && !pairCheckPanelAllowed) {
+                // Right address, but the site still shows another pair (it ignores the link): reloading
+                // will not help, so select the pair in the site's pair list straight away.
+                pairCheckPanelAllowed = true;
+                DiagnosticLog.log(this, "pair", "site shows another pair: selecting " + targetPair + " in the pair list");
             }
             boolean selectionSent = selected || "selected".equals(state);
             handler.postDelayed(() -> checkWatchPair(target, targetPair, check, selectionSent, showCopyList), 650);
@@ -1604,6 +1824,7 @@ public final class AutomationService extends Service {
     }
 
     private void cancelPairCheck() {
+        if (watchPairChecking) DiagnosticLog.log(this, "pair", "running check cancelled");
         watchPairCheck++;
         watchPairChecking = false;
         pairCheckFinished = null;
@@ -1757,7 +1978,7 @@ public final class AutomationService extends Service {
             case "Could not verify the NACE session. Check your connection and open Watch.": return AppLanguage.text(context, english, "Sesiunea NACE nu a putut fi verificată. Verifică conexiunea și deschide Vizualizare.", "No se pudo verificar la sesión de NACE. Comprueba tu conexión y abre Visualizar.");
             case "Open Control and check that you are using a live account.": return AppLanguage.text(context, english, "Deschide Control și verifică dacă folosești un cont real.", "Abre Control y comprueba que estés usando una cuenta real.");
             case "Check your login information and try again.": return AppLanguage.text(context, english, "Verifică datele de conectare și încearcă din nou.", "Comprueba tus datos de acceso e inténtalo de nuevo.");
-            case VERIFICATION_PREFILLED: return AppLanguage.text(context, english, "Numărul de telefon și parola sunt deja completate. Introdu codul de verificare, apoi apasă Login.", "Tu número de teléfono y tu contraseña ya están rellenados. Introduce el código de verificación y pulsa Login.");
+            case VERIFICATION_PREFILLED: return AppLanguage.text(context, english, "Numărul de telefon și parola sunt deja completate. Introdu codul de securitate, apoi apasă butonul Login de sub el (nu fila Login de sus). Dacă nu vezi butonul, derulează puțin în jos.", "Tu número de teléfono y tu contraseña ya están rellenados. Introduce el código de seguridad y pulsa el botón Login que está debajo (no la pestaña Login de arriba). Si no ves el botón, desplázate un poco hacia abajo.");
             case "Complete the verification step on the NACE login page.": return AppLanguage.text(context, english, "Finalizează verificarea pe pagina de conectare NACE.", "Completa la verificación en la página de acceso de NACE.");
             case "Signed in, but the login could not be saved on this phone.": return AppLanguage.text(context, english, "Te-ai conectat, dar datele nu au putut fi salvate pe telefon.", "Has iniciado sesión, pero no se pudieron guardar los datos en el teléfono.");
             case EXCHANGE_DNS_ERROR: return AppLanguage.text(context, english, "Domeniul NACE nu a putut fi rezolvat. Verifică linkul platformei.", "No se pudo resolver el dominio de NACE. Comprueba el enlace de la plataforma.");
@@ -1799,7 +2020,7 @@ public final class AutomationService extends Service {
             case "Skipped while manual control was open.": return AppLanguage.text(context, english, "Interval omis cât timp controlul manual era deschis.", "Se omitió mientras el control manual estaba abierto.");
             case "The manual pause could not be saved.": return AppLanguage.text(context, english, "Pauza pentru control manual nu a putut fi salvată.", "No se pudo guardar la pausa del control manual.");
             case "The Android browser stopped before NACE verified the result.": return AppLanguage.text(context, english, "Browserul Android s-a oprit înainte ca NACE să verifice rezultatul.", "El navegador de Android se detuvo antes de que NACE verificara el resultado.");
-            case "The Android browser stopped. Reopen the viewer to reconnect.": return AppLanguage.text(context, english, "Browserul Android s-a oprit. Redeschideți vizualizatorul pentru reconectare.", "El navegador de Android se detuvo. Vuelve a abrir el visor para conectarte.");
+            case "The Android browser stopped. NACE is reconnecting.": return AppLanguage.text(context, english, "Browserul Android s-a oprit. NACE se reconectează.", "El navegador de Android se detuvo. NACE se está reconectando.");
             case "Android could not initialize the browser.": return AppLanguage.text(context, english, "Android nu a putut inițializa browserul.", "Android no pudo iniciar el navegador.");
             case "Android could not keep the browser visible in the background.": return AppLanguage.text(context, english, "Android nu a putut păstra browserul vizibil în fundal.", "Android no pudo mantener el navegador visible en segundo plano.");
             case "Saved intervals could not be read. Review the schedule before enabling automation.": return AppLanguage.text(context, english, "Intervalele salvate nu au putut fi citite. Verificați programul înainte de activarea automatizării.", "No se pudieron leer los intervalos guardados. Revisa el horario antes de activar la automatización.");
@@ -1982,6 +2203,7 @@ public final class AutomationService extends Service {
             detail += "\n" + AppLanguage.text(this, "Last checked", "Ultima verificare", "Última comprobación") + " · "
                     + DateTimeFormatter.ofPattern("HH:mm:ss", Locale.ROOT).withZone(ZoneId.systemDefault()).format(lastCheck);
         }
+        DiagnosticLog.change(this, "status", title + (issue == null ? "" : " | " + issue));
         if (title.equals(notificationTitle) && detail.equals(notificationDetail)) return;
         getSystemService(NotificationManager.class).notify(NOTIFICATION_ID, workerNotification(title, detail));
         notificationTitle = title;
@@ -2004,7 +2226,33 @@ public final class AutomationService extends Service {
 
     private void reportBlocker(DailySchedule.Occurrence occurrence, String tradePair, String issue) {
         String key = occurrence.date + "/" + occurrence.start + "/" + occurrence.end + "/" + tradePair;
-        blockerAlert.report(key, occurrence.displayLabel(ZoneId.systemDefault()), tradePair, localize(this, issue));
+        String reason = localize(this, issue);
+        DiagnosticLog.change(this, "warning", "WARNING for " + occurrence.start + " " + tradePair + ": " + issue);
+        // A new problem is also spoken once: "Warning! Warning!" + the reason.
+        if (blockerAlert.report(key, occurrence.displayLabel(ZoneId.systemDefault()), tradePair, reason)) {
+            outcomeSpeaker.speakWarning(reason);
+        }
+    }
+
+    /** Clears a warning because automation verified it is ready again, and says so out loud. */
+    private void clearAndAnnounceRecovery(DailySchedule.Occurrence current) {
+        boolean hadWarning = blockerAlert.active();
+        showTradeFailureOrClear(current);
+        if (hadWarning && !blockerAlert.active()) outcomeSpeaker.speakRecovered();
+    }
+
+    /**
+     * Once per window, about five minutes before it opens and only after session, internet and pair
+     * were verified: "NACE automation online. Waiting for the trade."
+     */
+    private void announceOnlineBeforeWindow(DailySchedule.Occurrence target, ZonedDateTime now,
+            DailySchedule.Occurrence current) {
+        if (current != null || automationStopped || manualControl) return;
+        if (now.isBefore(target.from.minusSeconds(ONLINE_ANNOUNCE_LEAD_SECONDS))) return;
+        String key = target.date + "/" + target.start + "/" + target.end;
+        if (key.equals(preferences.getString(ONLINE_ANNOUNCED, null))) return;
+        preferences.edit().putString(ONLINE_ANNOUNCED, key).apply();
+        outcomeSpeaker.speakOnline();
     }
 
     private Notification workerNotification(String title, String detail) {
@@ -2049,6 +2297,15 @@ public final class AutomationService extends Service {
         return null;
     }
 
+    /** For the countdown pill: ms until the next window opens, 0 while one is open, -1 if none / stopped. */
+    long millisToNextTrade() {
+        if (automationStopped || windows.isEmpty()) return -1;
+        if (currentOccurrence() != null) return 0;
+        DailySchedule.Occurrence next = nextScheduledWindow();
+        if (next == null) return -1;
+        return Math.max(1, next.from.toInstant().toEpochMilli() - System.currentTimeMillis());
+    }
+
     private static boolean sameWindow(DailySchedule.Occurrence left, DailySchedule.Occurrence right) {
         return left != null && right != null && left.from.equals(right.from) && left.until.equals(right.until);
     }
@@ -2091,6 +2348,8 @@ public final class AutomationService extends Service {
     }
 
     private boolean record(DailySchedule.Occurrence occurrence, String pair, String status, String message, String signalId) {
+        DiagnosticLog.log(this, "trade", occurrence.date + " " + occurrence.start + " " + pair + ": " + status
+                + (message == null ? "" : " - " + message));
         String date = occurrence.date.toString();
         RunResult entry = new RunResult(pair, date, occurrence.start.toString(), occurrence.end.toString(), status,
                 message, signalId, occurrence.from.getZone());

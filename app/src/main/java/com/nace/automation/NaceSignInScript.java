@@ -95,7 +95,16 @@ final class NaceSignInScript {
                   const field = [...panel.querySelectorAll('input')].find(input =>
                     input !== phone && input !== password && input.type !== 'checkbox'
                       && input.getClientRects().length > 0 && getComputedStyle(input).visibility === 'visible');
-                  field?.scrollIntoView({block:'center', behavior:'instant'});
+                  if (!field) return;
+                  // Show the code field AND the Login button under it (not the "Login" tab at the top):
+                  // bring the button to the bottom of the view, then make sure the field is still on screen.
+                  const button = panel.querySelector('.login-btn button.oc-button--primary');
+                  if (button) {
+                    button.scrollIntoView({block:'end', behavior:'instant'});
+                    if (field.getBoundingClientRect().top < 8) field.scrollIntoView({block:'start', behavior:'instant'});
+                  } else {
+                    field.scrollIntoView({block:'center', behavior:'instant'});
+                  }
                 })
                 """ + "(" + JSONObject.quote(origin) + ")";
     }

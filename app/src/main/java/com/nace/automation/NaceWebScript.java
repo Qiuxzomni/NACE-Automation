@@ -71,9 +71,15 @@ final class NaceWebScript {
     }
 
     // The exchange restores its saved instrument on mount. Its drawer updates that preference.
-    static String selectWatchPair(String origin, String pair, boolean select, boolean showCopyList) {
+    /**
+     * Checks that the NACE page shows the selected pair. Read-only unless {@code allowPanel}: a wrong
+     * pair returns 'mismatch' and the service reloads the pair's own link. Only when that did not help
+     * (warm-up check, never WATCH) may it select the pair through the side panel as a last resort.
+     * With {@code showCopyList} it also opens the Copy Trading tab (a tab, not a pair change).
+     */
+    static String selectWatchPair(String origin, String pair, boolean allowPanel, boolean showCopyList) {
         return """
-                ((expectedOrigin, pair, stockId, select, showCopyList) => {
+                ((expectedOrigin, pair, stockId, allowPanel, showCopyList) => {
                   if (location.origin !== expectedOrigin) return 'other';
                   const [path, search = ''] = location.hash.slice(1).split('?');
                   if (path !== '/forward') return 'other';
@@ -84,17 +90,18 @@ final class NaceWebScript {
                   };
                   const text = element => element.textContent.replace(/\\s+/g, '').toUpperCase();
                   const header = document.querySelector('.stock-tarde_header_body .title .title_flex .names');
-                  if (header && text(header) === pair && new URLSearchParams(search).get('id') === stockId) {
+                  const idMatches = new URLSearchParams(search).get('id') === stockId;
+                  if (header && text(header) === pair && idMatches) {
                     if (!showCopyList) return 'matched';
                     const list = document.querySelector('.order-list');
-                    if (!list) return 'waiting';
+                    if (!list) return 'waiting-no-list';
                     const global = document.querySelector('#app')?.__vue_app__?.config.globalProperties;
                     const translated = typeof global?.$t === 'function' ? global.$t('common.gendanliebiao') : null;
                     const label = translated && translated !== 'common.gendanliebiao' ? translated : 'Copy Trading List';
                     const key = label.replace(/\\s+/g, '').toUpperCase();
                     const tabs = [...list.querySelectorAll('.tab_active_stock-detail_select .text-tabs-label')]
                         .filter(element => visible(element) && text(element) === key);
-                    if (tabs.length !== 1) return 'waiting';
+                    if (tabs.length !== 1) return tabs.length ? 'waiting-tabs' : 'waiting-no-tab';
                     const control = tabs[0];
                     if (!control.classList.contains('active') && control.getAttribute('aria-selected') !== 'true') {
                       control.click();
@@ -103,17 +110,28 @@ final class NaceWebScript {
                     list.scrollIntoView({block:'start', behavior:'instant'});
                     return 'matched';
                   }
-                  if (!select) return 'waiting';
+                  if (!header) return 'loading';
+                  // 'mismatch-url': on another pair's address. 'mismatch-header': right address, other pair shown.
+                  if (!allowPanel) return idMatches ? 'mismatch-header' : 'mismatch-url';
                   const drawer = [...document.querySelectorAll('.tarde.app_content')].find(visible);
                   if (!drawer) {
+                    // One click, then give the side panel time to slide in. Clicking every poll
+                    // toggled it open and closed and could leave it stuck open.
+                    const now = Date.now();
+                    if (now - (window.__naceDrawerClickAt || 0) < 2500) return 'drawer-opening';
                     const trigger = header?.closest('.title');
-                    if (trigger && visible(trigger)) trigger.click();
-                    return 'waiting';
+                    if (trigger && visible(trigger)) {
+                      window.__naceDrawerClickAt = now;
+                      trigger.click();
+                    }
+                    return 'drawer-clicked';
                   }
                   const rows = [...drawer.querySelectorAll('.chart-four .title.ellipsis-1')]
                     .filter(label => visible(label) && text(label) === pair);
                   if (rows.length === 1) {
                     rows[0].closest('.chart-four').click();
+                    // Give the site time to switch; if it did not, the next attempt comes after 2.5 s.
+                    window.__naceDrawerClickAt = Date.now();
                     return 'selected';
                   }
                   const input = drawer.querySelector('.search-ul input');
@@ -124,7 +142,7 @@ final class NaceWebScript {
                   }
                   return 'waiting';
                 })
-                """ + "(" + JSONObject.quote(origin) + "," + JSONObject.quote(pair) + "," + JSONObject.quote(instrumentId(pair)) + "," + select + "," + showCopyList + ")";
+                """ + "(" + JSONObject.quote(origin) + "," + JSONObject.quote(pair) + "," + JSONObject.quote(instrumentId(pair)) + "," + allowPanel + "," + showCopyList + ")";
     }
 
     static String cancelRun(String nonce) {

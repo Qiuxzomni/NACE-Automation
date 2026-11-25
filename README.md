@@ -2,7 +2,7 @@
 
 NACE Automation is an Android companion app for scheduled copy trading on the NACE exchange. Choose **BTC/USDT** or **ETH/USDT**, set your trading windows, and let the app submit eligible copy orders using the amount already filled in by the exchange. The automation runs on your phone, including while the screen is locked. It is built to be easy for everyone, including older users: it tells you out loud and with notifications whether it is ready, and helps you fix anything that is not.
 
-**[Download NACE Automation 1.7 (APK)](https://github.com/Qiuxzomni/NACE-Automation/releases/download/v1.7/NACE-Automation-1.7.apk)** · [Release history](https://github.com/Qiuxzomni/NACE-Automation/releases)
+**[Download NACE Automation 2.0 (APK)](https://github.com/Qiuxzomni/NACE-Automation/releases/download/v2.0/NACE-Automation-2.0.apk)** · [Release history](https://github.com/Qiuxzomni/NACE-Automation/releases)
 
 ## Get started
 

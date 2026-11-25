@@ -1759,6 +1759,13 @@ public final class MainActivity extends Activity {
     private boolean internetCheckRunning;
     private final java.util.Set<AutomationService.AttentionKind> postponedAttention =
             java.util.EnumSet.noneOf(AutomationService.AttentionKind.class);
+    /** When each problem popup was last shown: the same popup comes back only after a minute. */
+    private final java.util.Map<AutomationService.AttentionKind, Long> attentionShownAt =
+            new java.util.EnumMap<>(AutomationService.AttentionKind.class);
+    private static final long ATTENTION_REPEAT_MS = 60_000;
+    /** Most problems clear within seconds (session re-check, phone just woke up): wait before the popup. */
+    private static final long ATTENTION_GRACE_MS = 15_000;
+    private static final long LOGIN_ATTENTION_GRACE_MS = 4_000;
 
     private boolean batteryUnrestricted() {
         PowerManager power = getSystemService(PowerManager.class);
@@ -1805,8 +1812,14 @@ public final class MainActivity extends Activity {
             seenAttention = problem.kind;
             seenAttentionSince = now;
         }
-        // Only for problems that last a few seconds, not for a check that is still running.
-        if (now - seenAttentionSince < 4000 || postponedAttention.contains(problem.kind)) return;
+        // Only for problems that last, not for a check that is still running.
+        long grace = problem.kind == AutomationService.AttentionKind.LOGIN ? LOGIN_ATTENTION_GRACE_MS : ATTENTION_GRACE_MS;
+        if (now - seenAttentionSince < grace || postponedAttention.contains(problem.kind)) return;
+        boolean alreadyOpen = attentionDialog != null && attentionDialog.isShowing()
+                && ("issue:" + problem.kind.name()).equals(attentionKey);
+        Long shownAt = attentionShownAt.get(problem.kind);
+        if (!alreadyOpen && shownAt != null && now - shownAt < ATTENTION_REPEAT_MS) return;
+        if (!alreadyOpen) attentionShownAt.put(problem.kind, now);
         showAttention("issue:" + problem.kind.name(), problem);
     }
 

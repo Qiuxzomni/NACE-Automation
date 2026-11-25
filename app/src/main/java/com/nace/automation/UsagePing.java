@@ -31,7 +31,11 @@ final class UsagePing {
     private static final String PREFERENCES = "usage_stats";
     private static final String ENABLED = "enabled";
     private static final String INSTALL_ID = "install_id";
+    private static final String LAST_PING = "last_ping";
     private static final int JOB_ID = 7301;
+    /** One-off ping when none was sent in the last 20 hours (a periodic job first runs ~1 day late). */
+    private static final int CATCH_UP_JOB_ID = 7302;
+    private static final long CATCH_UP_AFTER_MS = TimeUnit.HOURS.toMillis(20);
 
     private UsagePing() {}
 
@@ -50,7 +54,18 @@ final class UsagePing {
         if (scheduler == null) return;
         if (!enabled(context)) {
             scheduler.cancel(JOB_ID);
+            scheduler.cancel(CATCH_UP_JOB_ID);
             return;
+        }
+        if (dueForCatchUp(context) && scheduler.getPendingJob(CATCH_UP_JOB_ID) == null) {
+            try {
+                scheduler.schedule(new JobInfo.Builder(CATCH_UP_JOB_ID, new ComponentName(context, Job.class))
+                        .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
+                        .setPersisted(true)
+                        .build());
+            } catch (RuntimeException error) {
+                Log.w("NaceAutomation", "Usage stats catch-up job could not be scheduled.", error);
+            }
         }
         if (scheduler.getPendingJob(JOB_ID) != null) return;
         JobInfo job = new JobInfo.Builder(JOB_ID, new ComponentName(context, Job.class))
@@ -67,6 +82,12 @@ final class UsagePing {
 
     private static SharedPreferences preferences(Context context) {
         return context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE);
+    }
+
+    private static boolean dueForCatchUp(Context context) {
+        long last = preferences(context).getLong(LAST_PING, 0L);
+        long now = System.currentTimeMillis();
+        return last <= 0L || last > now || now - last >= CATCH_UP_AFTER_MS;
     }
 
     private static synchronized String installId(Context context) {
@@ -109,7 +130,11 @@ final class UsagePing {
                 out.write(bytes);
             }
             int code = connection.getResponseCode();
-            if (code != 204) Log.i("NaceAutomation", "Usage stats ping returned HTTP " + code);
+            if (code == 204) {
+                preferences(context).edit().putLong(LAST_PING, System.currentTimeMillis()).apply();
+            } else {
+                Log.i("NaceAutomation", "Usage stats ping returned HTTP " + code);
+            }
         } finally {
             connection.disconnect();
         }
@@ -118,6 +143,8 @@ final class UsagePing {
     public static final class Job extends JobService {
         @Override public boolean onStartJob(JobParameters params) {
             if (!enabled(this)) return false;
+            // The catch-up ping is skipped when the daily ping already went out recently.
+            if (params.getJobId() == CATCH_UP_JOB_ID && !dueForCatchUp(this)) return false;
             new Thread(() -> {
                 try {
                     send(getApplicationContext());

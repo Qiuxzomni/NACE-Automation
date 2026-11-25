@@ -341,6 +341,10 @@ public final class AutomationService extends Service {
     private TradeOutcomeSpeaker outcomeSpeaker;
     private String notificationTitle;
     private String notificationDetail;
+    /** While a problem is younger than the grace period the notification keeps its last good status. */
+    private long notificationIssueSince;
+    private boolean lastStatusLive;
+    private boolean lastStatusKnown;
 
     static boolean resumeAfterBoot(Context context) {
         SharedPreferences saved = context.getSharedPreferences(PREFS, MODE_PRIVATE);
@@ -399,6 +403,58 @@ public final class AutomationService extends Service {
         else registerReceiver(timeZoneChanged, timeZoneFilter);
         handler.post(tick);
         DiagnosticLog.log(this, "service", "created");
+        logPreviousExit();
+        installCrashLogger(getApplicationContext());
+    }
+
+    private static final String LAST_EXIT_LOGGED = "last_exit_logged";
+    private static final String[] EXIT_REASONS = {"unknown", "exit self", "signaled (killed)", "low memory",
+            "CRASH", "native crash", "ANR (not responding)", "initialization failure", "permission change",
+            "excessive resource use", "user requested", "user stopped", "dependency died", "other",
+            "frozen", "package state change", "package updated"};
+
+    /** Why Android ended the previous NACE process: memory, battery manager, crash, update, user. */
+    private void logPreviousExit() {
+        if (Build.VERSION.SDK_INT < 30) return;
+        try {
+            android.app.ActivityManager manager = getSystemService(android.app.ActivityManager.class);
+            if (manager == null) return;
+            List<android.app.ApplicationExitInfo> exits = manager.getHistoricalProcessExitReasons(getPackageName(), 0, 1);
+            if (exits.isEmpty()) return;
+            android.app.ApplicationExitInfo last = exits.get(0);
+            String key = String.valueOf(last.getTimestamp());
+            if (key.equals(preferences.getString(LAST_EXIT_LOGGED, null))) return;
+            preferences.edit().putString(LAST_EXIT_LOGGED, key).apply();
+            int reason = last.getReason();
+            String name = reason >= 0 && reason < EXIT_REASONS.length ? EXIT_REASONS[reason] : "reason " + reason;
+            String when = DateTimeFormatter.ofPattern("HH:mm:ss", Locale.ROOT).withZone(ZoneId.systemDefault())
+                    .format(Instant.ofEpochMilli(last.getTimestamp()));
+            DiagnosticLog.log(this, "exit", "previous process ended at " + when + ": " + name
+                    + (last.getDescription() == null ? "" : " (" + last.getDescription() + ")")
+                    + ", importance " + last.getImportance());
+        } catch (RuntimeException error) {
+            DiagnosticLog.log(this, "exit", "could not read the previous exit reason: " + error);
+        }
+    }
+
+    private static boolean crashLoggerInstalled;
+
+    /** Writes the first lines of an unexpected crash to the diagnostic log, then lets Android handle it. */
+    private static synchronized void installCrashLogger(Context context) {
+        if (crashLoggerInstalled) return;
+        crashLoggerInstalled = true;
+        Thread.UncaughtExceptionHandler previous = Thread.getDefaultUncaughtExceptionHandler();
+        Thread.setDefaultUncaughtExceptionHandler((thread, error) -> {
+            try {
+                StringBuilder trace = new StringBuilder(String.valueOf(error));
+                StackTraceElement[] frames = error.getStackTrace();
+                for (int index = 0; index < Math.min(6, frames.length); index++) trace.append(" | at ").append(frames[index]);
+                DiagnosticLog.log(context, "CRASH", "thread " + thread.getName() + ": " + trace);
+            } catch (Throwable ignored) {
+                // Never let logging hide the original crash.
+            }
+            if (previous != null) previous.uncaughtException(thread, error);
+        });
     }
 
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
@@ -804,7 +860,8 @@ public final class AutomationService extends Service {
         watchPairRetries = 0;
         DiagnosticLog.log(this, "viewer", (takeControl ? "CONTROL" : "WATCH") + " opened (session "
                 + effectiveSession(SystemClock.elapsedRealtime()) + ", warm-up pair ready " + preflightPairReady + ")");
-        preflightPairReady = false;
+        // WATCH always ends on the selected pair. Only CONTROL can change the pair on the website.
+        if (takeControl) preflightPairReady = false;
         detach(browser);
         browser.readOnly = !takeControl;
         browser.setFocusable(takeControl);
@@ -884,8 +941,9 @@ public final class AutomationService extends Service {
         // The OnePlus can batch an alarm before its requested time as well as after it.
         long warmupLead = WindowWakeups.WORKER_WAKE_LEAD_SECONDS + (earlyAlarmReceived ? 180 : 0);
         boolean warmupDue = next != null && !next.from.isAfter(now.plusSeconds(warmupLead));
-        return foreground && configurationValid && (currentOccurrence() != null
-                || warmupDue || trackedWindow != null || activeRun != null
+        DailySchedule.Occurrence current = currentOccurrence();
+        return foreground && configurationValid && ((current != null && !windowCompleted(current))
+                || warmupDue || (trackedWindow != null && !windowCompleted(trackedWindow)) || activeRun != null
                 || finalConfirmationBrowser != null);
     }
 
@@ -894,7 +952,13 @@ public final class AutomationService extends Service {
     }
 
     private static final long HEALTH_CHECK_MS = 180_000;
+    /** An internet or link problem at the end of the check gets one more minute with a fresh check. */
+    private static final long HEALTH_RECHECK_MS = 60_000;
+    /** Android sometimes delivers the health alarm early and then again on time: run it only once. */
+    private static final long HEALTH_CHECK_REPEAT_MS = 15 * 60_000;
     private long healthCheckUntil;
+    private long healthCheckStartedAt;
+    private boolean healthRechecked;
     private final Runnable healthVerdict = this::finishHealthCheck;
 
     private boolean healthCheckActive() {
@@ -903,7 +967,15 @@ public final class AutomationService extends Service {
 
     /** About an hour before a window: wake up, check internet, NACE and login for three minutes. */
     private void startHealthCheck() {
-        healthCheckUntil = SystemClock.elapsedRealtime() + HEALTH_CHECK_MS;
+        long elapsed = SystemClock.elapsedRealtime();
+        if (healthCheckStartedAt != 0 && elapsed - healthCheckStartedAt < HEALTH_CHECK_REPEAT_MS) {
+            DiagnosticLog.log(this, "health", "check skipped (one started "
+                    + (elapsed - healthCheckStartedAt) / 1000 + " s ago)");
+            return;
+        }
+        healthCheckStartedAt = elapsed;
+        healthRechecked = false;
+        healthCheckUntil = elapsed + HEALTH_CHECK_MS;
         lastProbeAt = 0;
         handler.removeCallbacks(healthVerdict);
         handler.postDelayed(healthVerdict, HEALTH_CHECK_MS);
@@ -914,7 +986,22 @@ public final class AutomationService extends Service {
         healthCheckUntil = 0;
         Attention problem = attention();
         DailySchedule.Occurrence next = nextScheduledWindow();
-        if (problem != null && problem.kind != AttentionKind.OTHER && next != null && !automationStopped) {
+        boolean reportable = problem != null && problem.kind != AttentionKind.OTHER && next != null && !automationStopped;
+        if (reportable && !healthRechecked
+                && (problem.kind == AttentionKind.INTERNET || problem.kind == AttentionKind.LINK)) {
+            // The last result can be minutes old. Load NACE again and test the internet before warning.
+            healthRechecked = true;
+            healthCheckUntil = SystemClock.elapsedRealtime() + HEALTH_RECHECK_MS;
+            DiagnosticLog.log(this, "health", "problem at the end of the check, checking again for 1 minute: "
+                    + problem.issue);
+            lastProbeAt = 0;
+            retryLoadAt = 0;
+            reloadDelay = MIN_RELOAD_DELAY_MS;
+            handler.postDelayed(healthVerdict, HEALTH_RECHECK_MS);
+            wakeWorker();
+            return;
+        }
+        if (reportable) {
             DiagnosticLog.log(this, "health", "PROBLEM before " + next.start + ": " + problem.issue);
             reportBlocker(next, pair, problem.issue);
         } else {
@@ -1046,7 +1133,7 @@ public final class AutomationService extends Service {
             advance(activeRun, current, elapsed);
             return;
         }
-        if (current == null || automationIssue(elapsed, current) != null) return;
+        if (current == null || windowCompleted(current) || automationIssue(elapsed, current) != null) return;
 
         activeRun = new Run(current, pair);
         message = "Finding the copy trade for " + pair + ".";
@@ -1075,21 +1162,25 @@ public final class AutomationService extends Service {
     private void runPreflight(DailySchedule.Occurrence current, long elapsed) {
         if (!foreground) return;
         ZonedDateTime now = ZonedDateTime.now(scheduleZone);
-        DailySchedule.Occurrence target = current == null || hasWindowBlock(current) ? upcomingPreflight(now) : current;
+        DailySchedule.Occurrence target = current == null || hasWindowBlock(current) || windowCompleted(current)
+                ? upcomingPreflight(now) : current;
         if (target == null || hasWindowBlock(target)) {
             showTradeFailureOrClear(current);
             return;
         }
         boolean finalCheck = !now.isBefore(target.from.minusSeconds(FINAL_PREFLIGHT_LEAD_SECONDS));
         if (!sameWindow(target, preflightWindow) || finalCheck != finalPreflight || !pair.equals(preflightPair)) {
+            // The pair is checked once per window. It is checked again only when the window or the
+            // pair changes, CONTROL was used, or the background service restarted.
+            boolean keepPair = preflightPairReady && sameWindow(target, preflightWindow) && pair.equals(preflightPair);
             preflightWindow = target;
             preflightPair = pair;
             finalPreflight = finalCheck;
-            preflightPairReady = false;
+            preflightPairReady = keepPair;
             preflightIssue = null;
             preflightStartedAt = elapsed;
             DiagnosticLog.log(this, "preflight", (finalCheck ? "final check" : "warm-up") + " for "
-                    + target.date + " " + target.start + " " + pair);
+                    + target.date + " " + target.start + " " + pair + (keepPair ? " (pair already confirmed)" : ""));
             logEnvironment();
             preflightRequiredProbe = probeId + 1;
             nextPairCheckAt = 0;
@@ -1101,7 +1192,7 @@ public final class AutomationService extends Service {
             preflightInternet = null;
             preflightInternetCheckedAt = 0;
             int check = ++preflightInternetGeneration;
-            internetProbe.check(online -> {
+            probeInternetWithRetry(INTERNET_PROBE_ATTEMPTS, online -> {
                 if (check != preflightInternetGeneration) return;
                 DiagnosticLog.change(this, "internet", online ? "online" : "OFFLINE (probe failed)");
                 preflightInternet = online;
@@ -1131,12 +1222,32 @@ public final class AutomationService extends Service {
         nextPairCheckAt = elapsed + 10000;
         long checkpoint = preflightStartedAt;
         startPairCheck(false, confirmed -> {
-            if (checkpoint != preflightStartedAt || !sameWindow(target, preflightWindow)
-                    || readinessIssue(SystemClock.elapsedRealtime()) != null) return;
+            if (checkpoint != preflightStartedAt || !sameWindow(target, preflightWindow)) return;
+            // A confirmed pair stays confirmed even if the session check briefly restarted meanwhile
+            // (opening the pair's page does that). A failed check only counts when nothing else is wrong.
+            if (!confirmed && readinessIssue(SystemClock.elapsedRealtime()) != null) return;
             preflightPairReady = confirmed;
             preflightIssue = confirmed ? null : "Could not verify the selected pair. Open Watch to check it.";
             if (confirmed) clearAndAnnounceRecovery(currentOccurrence());
             else notifyPreflightIssue(preflightIssue);
+        });
+    }
+
+    private static final int INTERNET_PROBE_ATTEMPTS = 3;
+    private static final long INTERNET_PROBE_RETRY_MS = 5000;
+
+    /**
+     * Right after the phone wakes up the first request often fails although the internet works.
+     * Only report "offline" after several failed attempts a few seconds apart.
+     */
+    private void probeInternetWithRetry(int attemptsLeft, java.util.function.Consumer<Boolean> done) {
+        internetProbe.check(online -> {
+            if (online || attemptsLeft <= 1) {
+                done.accept(online);
+                return;
+            }
+            DiagnosticLog.log(this, "internet", "probe failed, retrying (" + (attemptsLeft - 1) + " left)");
+            handler.postDelayed(() -> probeInternetWithRetry(attemptsLeft - 1, done), INTERNET_PROBE_RETRY_MS);
         });
     }
 
@@ -1404,6 +1515,8 @@ public final class AutomationService extends Service {
             if ("submitted".equals(status)) {
                 failedTradeWindow = null;
                 failedTradeIssue = null;
+                blockerAlert.clear();
+                DiagnosticLog.log(this, "trade", "window " + run.occurrence.start + " closed as successful");
                 outcomeSpeaker.speak(true);
             } else if ("failed".equals(status) || ("skipped".equals(status) && !manualControl)) {
                 // "Trade failed" first, then the spoken WARNING with the reason (from reportBlocker).
@@ -1697,7 +1810,9 @@ public final class AutomationService extends Service {
         setSession(SessionState.UNAVAILABLE, null, false);
         retryLoadAt = SystemClock.elapsedRealtime() + reloadDelay;
         mainFrameFailed = true;
-        internetProbe.check(online -> {
+        // Retry the internet test so a single failed request does not turn an exchange problem
+        // into "Internet is down".
+        probeInternetWithRetry(INTERNET_PROBE_ATTEMPTS, online -> {
             if (generation != exchangeLoadGeneration || !mainFrameFailed) return;
             internetAtPageFailure = online;
             if (online) lastOnlinePageFailureAt = SystemClock.elapsedRealtime();
@@ -2164,6 +2279,8 @@ public final class AutomationService extends Service {
             return "The last confirmation is unresolved. Browser control is temporarily locked.";
         }
         if (parked) return null;
+        if (current != null && windowCompleted(current)
+                && upcomingPreflight(ZonedDateTime.now(scheduleZone)) == null) return null;
         String issue = readinessIssue(elapsed);
         if (issue != null) return issue;
         if (current != null && hasWindowBlock(current)) return "This window is blocked by a previous run.";
@@ -2177,21 +2294,36 @@ public final class AutomationService extends Service {
 
     private void updateWorkerNotification() {
         if (!foreground) return;
-        String issue = automationIssue(SystemClock.elapsedRealtime(), currentOccurrence());
+        long nowElapsed = SystemClock.elapsedRealtime();
+        String issue = automationIssue(nowElapsed, currentOccurrence());
+        if (issue == null || automationStopped || manualControl) notificationIssueSince = 0;
+        else if (notificationIssueSince == 0) notificationIssueSince = nowElapsed;
+        // Checks that finish within seconds (app opened, phone woke up) do not flash "NOT READY".
+        boolean heldIssue = issue != null && !automationStopped && !manualControl
+                && nowElapsed - notificationIssueSince < BLOCKER_GRACE_MS;
         String title;
         if (automationStopped) {
             title = AppLanguage.text(this, "AUTOMATION STOPPED", "AUTOMATIZARE OPRITĂ", "AUTOMATIZACIÓN DETENIDA");
         } else if (manualControl) {
             title = AppLanguage.text(this, "AUTOMATION PAUSED", "AUTOMATIZARE ÎN PAUZĂ", "AUTOMATIZACIÓN EN PAUSA");
+        } else if (heldIssue) {
+            title = !lastStatusKnown
+                    ? AppLanguage.text(this, "CHECKING AUTOMATION", "SE VERIFICĂ AUTOMATIZAREA", "COMPROBANDO LA AUTOMATIZACIÓN")
+                    : lastStatusLive ? AppLanguage.text(this, "AUTOMATION LIVE", "AUTOMATIZARE LIVE", "AUTOMATIZACIÓN ACTIVA")
+                    : AppLanguage.text(this, "AUTOMATION SCHEDULED", "AUTOMATIZARE PROGRAMATĂ", "AUTOMATIZACIÓN PROGRAMADA");
         } else if (parked && issue == null) {
             title = AppLanguage.text(this, "AUTOMATION SCHEDULED", "AUTOMATIZARE PROGRAMATĂ", "AUTOMATIZACIÓN PROGRAMADA");
+            lastStatusKnown = true;
+            lastStatusLive = false;
         } else if (issue != null) {
             title = AppLanguage.text(this, "AUTOMATION NOT READY", "AUTOMATIZARE INDISPONIBILĂ", "AUTOMATIZACIÓN INDISPONIBLE");
         } else {
             title = AppLanguage.text(this, "AUTOMATION LIVE", "AUTOMATIZARE LIVE", "AUTOMATIZACIÓN ACTIVA");
+            lastStatusKnown = true;
+            lastStatusLive = true;
         }
         String detail = manualControl ? localize(this, "Control is open. Scheduled automation is paused.")
-                : issue != null ? localize(this, issue) : pair;
+                : issue != null && !heldIssue ? localize(this, issue) : pair;
         if (!manualControl && !automationStopped) {
             DailySchedule.Occurrence next = nextScheduledWindow();
             if (next != null) {
@@ -2203,7 +2335,7 @@ public final class AutomationService extends Service {
             detail += "\n" + AppLanguage.text(this, "Last checked", "Ultima verificare", "Última comprobación") + " · "
                     + DateTimeFormatter.ofPattern("HH:mm:ss", Locale.ROOT).withZone(ZoneId.systemDefault()).format(lastCheck);
         }
-        DiagnosticLog.change(this, "status", title + (issue == null ? "" : " | " + issue));
+        DiagnosticLog.change(this, "status", title + (issue == null ? "" : (heldIssue ? " (checking) | " : " | ") + issue));
         if (title.equals(notificationTitle) && detail.equals(notificationDetail)) return;
         getSystemService(NotificationManager.class).notify(NOTIFICATION_ID, workerNotification(title, detail));
         notificationTitle = title;
@@ -2216,12 +2348,28 @@ public final class AutomationService extends Service {
         } else {
             failedTradeWindow = null;
             failedTradeIssue = null;
+            preflightProblemSince = 0;
             blockerAlert.clear();
         }
     }
 
+    /** A short hiccup (a few seconds) is not worth alarming an elderly user over. */
+    private static final long BLOCKER_GRACE_MS = 45_000;
+    private long preflightProblemSince;
+
     private void notifyPreflightIssue(String issue) {
-        if (preflightWindow != null) reportBlocker(preflightWindow, pair, issue);
+        if (preflightWindow == null) return;
+        long now = SystemClock.elapsedRealtime();
+        if (!blockerAlert.active()) {
+            if (preflightProblemSince == 0) {
+                preflightProblemSince = now;
+                DiagnosticLog.log(this, "warning", "problem seen, waiting " + BLOCKER_GRACE_MS / 1000
+                        + " s before warning: " + issue);
+                handler.postDelayed(this::wakeWorker, BLOCKER_GRACE_MS + 500);
+            }
+            if (now - preflightProblemSince < BLOCKER_GRACE_MS) return;
+        }
+        reportBlocker(preflightWindow, pair, issue);
     }
 
     private void reportBlocker(DailySchedule.Occurrence occurrence, String tradePair, String issue) {
@@ -2236,6 +2384,10 @@ public final class AutomationService extends Service {
 
     /** Clears a warning because automation verified it is ready again, and says so out loud. */
     private void clearAndAnnounceRecovery(DailySchedule.Occurrence current) {
+        if (preflightProblemSince != 0 && !blockerAlert.active()) {
+            DiagnosticLog.log(this, "warning", "problem cleared within the grace period, no warning given");
+        }
+        preflightProblemSince = 0;
         boolean hadWarning = blockerAlert.active();
         showTradeFailureOrClear(current);
         if (hadWarning && !blockerAlert.active()) outcomeSpeaker.speakRecovered();
@@ -2300,7 +2452,8 @@ public final class AutomationService extends Service {
     /** For the countdown pill: ms until the next window opens, 0 while one is open, -1 if none / stopped. */
     long millisToNextTrade() {
         if (automationStopped || windows.isEmpty()) return -1;
-        if (currentOccurrence() != null) return 0;
+        DailySchedule.Occurrence current = currentOccurrence();
+        if (current != null && !windowCompleted(current)) return 0;
         DailySchedule.Occurrence next = nextScheduledWindow();
         if (next == null) return -1;
         return Math.max(1, next.from.toInstant().toEpochMilli() - System.currentTimeMillis());
@@ -2315,6 +2468,18 @@ public final class AutomationService extends Service {
             if (overlaps(result, occurrence)) return result;
         }
         return null;
+    }
+
+    /**
+     * A window whose order was confirmed in the Order tab is finished: no further runs, checks,
+     * warnings or speech for it. The countdown moves on to the next window.
+     */
+    private boolean windowCompleted(DailySchedule.Occurrence occurrence) {
+        if (occurrence == null) return false;
+        for (RunResult result : results.values()) {
+            if ("submitted".equals(result.status) && overlaps(result, occurrence)) return true;
+        }
+        return false;
     }
 
     private boolean hasWindowBlock(DailySchedule.Occurrence occurrence) {
